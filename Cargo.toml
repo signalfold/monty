@@ -4,5 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-python-parser = "0.2.0"
-num-traits = "0.2.15"
+rustpython-parser = { git = "https://github.com/charliermarsh/RustPython.git", rev = "c3147d2c1524ebd0e90cf1c2938d770314fd5a5a" }

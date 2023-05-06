@@ -1,6 +1,6 @@
 use std::fmt::Debug;
-use num_traits::{ToPrimitive};
-use python_parser::ast::*;
+use rustpython_parser::ast::{Stmt, StmtKind, Expr as AstExpr, ExprKind, Constant, Operator, Keyword};
+use rustpython_parser::parse_program;
 
 fn main() {
     monty();
@@ -25,15 +25,16 @@ enum Expr {
         target: String,
         value: Box<Expr>,
     },
-    Constant(Value),
+    Constant(Constant),
     Name(String),
     Call {
         func: String,
         args: Vec<Expr>,
+        kwargs: Vec<(String, Expr)>,
     },
     Op {
         left: Box<Expr>,
-        op: Bop,
+        op: Operator,
         right: Box<Expr>,
     },
     List(Vec<Expr>),
@@ -45,24 +46,22 @@ enum Node {
     Pass,
     Expression(Expr),
     For {
-        item: Expr,
+        target: Expr,
         iter: Expr,
         body: Vec<Node>,
-        // this could be just `Vec<Node>`, is that faster?
-        or_else: Option<Vec<Node>>,
+        or_else: Vec<Node>,
     },
     If {
         test: Expr,
         body: Vec<Node>,
-        // this could be just `Vec<Node>`, is that faster?
-        or_else: Option<Vec<Node>>,
+        or_else: Vec<Node>,
     },
 }
 
 
 fn monty() {
-    let code = "for i in y:\n    i = 1\n";
-    let (_, ast) = python_parser::file_input(python_parser::make_strspan(code)).unwrap();
+    let code = "for i in foo:\n x = '1'\n";
+    let ast = parse_program(code, "example.py").unwrap();
     dbg!(&ast);
     let nodes = parse_statements(ast).unwrap();
     dbg!(nodes);
@@ -70,145 +69,117 @@ fn monty() {
 
 type ParseResult<T> = Result<T, String>;
 
-fn parse_statements(statements: Vec<Statement>) -> ParseResult<Vec<Node>> {
+fn parse_statements(statements: Vec<Stmt>) -> ParseResult<Vec<Node>> {
     statements.into_iter().map(|e| parse_statement(e)).collect()
 }
 
-fn parse_statement(statement: Statement) -> ParseResult<Node> {
-    match statement {
-        Statement::Pass => Ok(Node::Pass),
-        Statement::Del(_expr) => todo!("Del"),
-        Statement::Break => todo!("Break"),
-        Statement::Continue => todo!("Continue"),
-        Statement::Return(_expr) => todo!("Return"),
-        Statement::RaiseExcFrom(_expr1, _expr2) => todo!("RaiseExcFrom"),
-        Statement::RaiseExc(_expr) => todo!("RaiseExc"),
-        Statement::Raise => todo!("Raise"),
-        Statement::Global(_names) => todo!("Global"),
-        Statement::Nonlocal(_names) => todo!("Nonlocal"),
-        Statement::Assert(_expr, _op_exp) => todo!("Assert"),
-        Statement::Import(_import) => todo!("Import"),
-        Statement::Expressions(_expressions) => todo!("Expressions"),
-        // `lhs = rhs1 = rhs2` -> `lhs, vec![rhs1, rhs2]`
-        Statement::Assignment(lhs, rhs) => {
-            assert_eq!(rhs.len(), 1);
-            let rhs1 = first(rhs)?;
-            parse_assignment(lhs, rhs1)
+fn parse_statement(statement: Stmt) -> ParseResult<Node> {
+    match statement.node {
+        StmtKind::FunctionDef {name, args, body, decorator_list, returns, type_comment} => todo!("FunctionDef"),
+        StmtKind::AsyncFunctionDef {name, args, body, decorator_list, returns, type_comment} => todo!("AsyncFunctionDef"),
+        StmtKind::ClassDef {name, bases, keywords, body, decorator_list} => todo!("ClassDef"),
+        StmtKind::Return {value} => todo!("Return"),
+        StmtKind::Delete {targets} => todo!("Delete"),
+        StmtKind::Assign {targets, value, ..} => parse_assignment(first(targets)?, *value),
+        StmtKind::AugAssign {target, op, value} => todo!("AugAssign"),
+        StmtKind::AnnAssign {target, value, ..} => match value {
+            Some(value) => parse_assignment(*target, *value),
+            None => Ok(Node::Pass),
         },
-        // `lhs: type` -> `lhs, type`
-        Statement::TypeAnnotation(_lhs, _rhs) => Ok(Node::Pass),
-        // `lhs: type = rhs` -> `lhs, type, rhs`
-        Statement::TypedAssignment(lhs, _tp, rhs) => parse_assignment(lhs, rhs),
-        // `lhs += rhs` -> `lhs, AugAssignOp::Add, rhs`
-        Statement::AugmentedAssignment(_lhs, _op, _rhs) => todo!("AugmentedAssignment"),
-
-        Statement::Compound(compound_statement) => parse_compound(*compound_statement),
+        StmtKind::For {target, iter, body, orelse, .. } => {
+            let target = parse_expression(*target)?;
+            let iter = parse_expression(*iter)?;
+            let body = parse_statements(body)?;
+            let or_else = parse_statements(orelse)?;
+            Ok(Node::For { target, iter, body, or_else })
+        },
+        StmtKind::AsyncFor {target, iter, body, orelse, type_comment} => todo!("AsyncFor"),
+        StmtKind::While {test, body, orelse} => todo!("While"),
+        StmtKind::If {test, body, orelse} => {
+            let test = parse_expression(*test)?;
+            let body = parse_statements(body)?;
+            let or_else = parse_statements(orelse)?;
+            Ok(Node::If {test, body, or_else})
+        },
+        StmtKind::With {items, body, type_comment} => todo!("With"),
+        StmtKind::AsyncWith {items, body, type_comment} => todo!("AsyncWith"),
+        StmtKind::Match {subject, cases} => todo!("Match"),
+        StmtKind::Raise {exc, cause} => todo!("Raise"),
+        StmtKind::Try {body, handlers, orelse, finalbody} => todo!("Try"),
+        StmtKind::TryStar {body, handlers, orelse, finalbody} => todo!("TryStar"),
+        StmtKind::Assert {test, msg} => todo!("Assert"),
+        StmtKind::Import {names} => todo!("Import"),
+        StmtKind::ImportFrom {module, names, level} => todo!("ImportFrom"),
+        StmtKind::Global {names} => todo!("Global"),
+        StmtKind::Nonlocal {names} => todo!("Nonlocal"),
+        StmtKind::Expr {value} => todo!("Expr"),
+        StmtKind::Pass => Ok(Node::Pass),
+        StmtKind::Break => todo!("Break"),
+        StmtKind::Continue => todo!("Continue"),
     }
-}
-
-fn parse_compound(compound: CompoundStatement) -> ParseResult<Node> {
-    match compound {
-        CompoundStatement::If(ifs, or_else) => {
-            let mut ifs_iter = ifs.into_iter().rev();
-            let or_else = match or_else {
-                Some(statements) => Some(parse_statements(statements)?),
-                None => None,
-            };
-
-            let (test, body) = ifs_iter.next().unwrap();
-            let mut node = parse_if(test, body, or_else)?;
-
-            for (test, body) in ifs_iter {
-                node = parse_if(test, body, Some(vec![node]))?;
-            }
-            Ok(node)
-        }
-        CompoundStatement::For { r#async, item, iterator, for_block, else_block, .. } => {
-            assert!(!r#async);
-            let item = parse_expression(first(item)?)?;
-            let iter = parse_expression(first(iterator)?)?;
-            let body = parse_statements(for_block)?;
-            let or_else = match else_block {
-                Some(statements) => Some(parse_statements(statements)?),
-                None => None,
-            };
-            Ok(Node::For { item, iter, body, or_else })
-        }
-        CompoundStatement::While(_test, _while_block, _else_block) => todo!("while"),
-        CompoundStatement::With(_items, _with_block) => todo!("with"),
-        CompoundStatement::Funcdef(_funcdef) => todo!("funcdef"),
-        CompoundStatement::Classdef(_class_def) => todo!("class_def"),
-        CompoundStatement::Try(_try_block) => todo!("try"),
-    }
-}
-
-fn parse_if(test: Expression, body: Vec<Statement>, or_else: Option<Vec<Node>>) -> ParseResult<Node> {
-    let test = parse_expression(test)?;
-    let body = parse_statements(body)?;
-    Ok(Node::If { test, body, or_else})
 }
 
 /// `lhs = rhs` -> `lhs, rhs`
-fn parse_assignment(lhs: Vec<Expression>, rhs: Vec<Expression>) -> ParseResult<Node> {
-    assert_eq!(rhs.len(), 1);
-    let target = first(lhs)?;
-    let target = match target {
-        Expression::Name(name) => name,
-        _ => todo!(),
-    };
-    assert_eq!(rhs.len(), 1);
-    let rhs_expr = first(rhs)?;
-    let value = Box::new(parse_expression(rhs_expr)?);
+fn parse_assignment(lhs: AstExpr, rhs: AstExpr) -> ParseResult<Node> {
+    let target = get_name(lhs)?;
+    let value = Box::new(parse_expression(rhs)?);
     Ok(Node::Expression(Expr::Assign { target, value }))
 }
 
-fn parse_expression(expression: Expression) -> ParseResult<Expr> {
-    match expression {
-        Expression::Ellipsis => todo!("Ellipsis"),
-        Expression::None => Ok(Expr::Constant(Value::None)),
-        Expression::True => Ok(Expr::Constant(Value::True)),
-        Expression::False => Ok(Expr::Constant(Value::False)),
-        Expression::Name(name) => Ok(Expr::Name(name)),
-        Expression::Int(int_type) => Ok(Expr::Constant(Value::Int(int_type.to_i64().unwrap()))),
-        Expression::ImaginaryInt(_int) => todo!("ImaginaryInt"),
-        Expression::Float(float_type) => Ok(Expr::Constant(Value::Float(float_type.to_f64().unwrap()))),
-        Expression::ImaginaryFloat(_f) => todo!("ImaginaryFloat"),
-        Expression::String(str_vec) => {
-            let v = str_vec.into_iter().map(prepare_str).collect::<ParseResult<Vec<_>>>()?;
-            Ok(Expr::Constant(Value::Str(v.join(""))))
-        }
-        Expression::Bytes(_vec) => todo!("Bytes"),
-        Expression::DictLiteral(_items) => todo!("DictLiteral"),
-        Expression::SetLiteral(_items) => todo!("SetLiteral"),
-        Expression::ListLiteral(_items) => todo!("ListLiteral"),
-        Expression::TupleLiteral(_items) => todo!("TupleLiteral"),
-        Expression::DictComp(_items, _comp) => todo!("DictComp"),
-        Expression::SetComp(_items, _comp) => todo!("SetComp"),
-        Expression::ListComp(_items, _comp) => todo!("ListComp"),
-        Expression::Generator(_items, _comp) => todo!("Generator"),
-        Expression::Await(_) => todo!("Await"),
-        Expression::Call(_name, _args) => todo!("Call"),
-        Expression::Subscript(_, _vec) => todo!("Subscript"),
-        Expression::Attribute(_lhs, _name) => todo!("Attribute"),
-        Expression::Uop(_uop, _expr) => todo!("Uop"),
-        // Binary operator. A simplified version of `MultiBop`, when the
-        // expressivity of MultiBop is not needed.
-        Expression::Bop(op, lhs, rhs) => {
-            let left = Box::new(parse_expression(*lhs)?);
-            let right = Box::new(parse_expression(*rhs)?);
+fn parse_expression(expression: AstExpr) -> ParseResult<Expr> {
+    match expression.node {
+        ExprKind::BoolOp { op, values } => { todo!("BoolOp") },
+        ExprKind::NamedExpr { target, value } => todo!("NamedExpr"),
+        ExprKind::BinOp { left, op, right } => {
+            let left = Box::new(parse_expression(*left)?);
+            let right = Box::new(parse_expression(*right)?);
             Ok(Expr::Op { left, op, right })
         },
-        // Binary operator... but may be applied on more than one expr
-        // (eg. `a <= b < c`)
-        Expression::MultiBop(lhs, ops) => todo!("MultiBop"),
-        // 1 if 2 else 3
-        Expression::Ternary(_true, _if, _else) => todo!("Ternary"),
-        Expression::Yield(_vec) => todo!("Yield"),
-        Expression::YieldFrom(_expr) => todo!("YieldFrom"),
-        Expression::Star(_expr) => todo!("Star"),
-        Expression::Lambdef(_untyped_args_list, _expr) => todo!("Lambdef"),
-        // Walrus operator: 1 := 2
-        Expression::Named(_lhs, _rhs) => todo!("Named"),
+        ExprKind::UnaryOp { op, operand } => todo!("UnaryOp"),
+        ExprKind::Lambda { args, body } => todo!("Lambda"),
+        ExprKind::IfExp { test, body, orelse } => todo!("IfExp"),
+        ExprKind::Dict { keys, values } => todo!("Dict"),
+        ExprKind::Set { elts } => todo!("Set"),
+        ExprKind::ListComp { elt, generators } => todo!("ListComp"),
+        ExprKind::SetComp { elt, generators } => todo!("SetComp"),
+        ExprKind::DictComp { key, value, generators } => todo!("DictComp"),
+        ExprKind::GeneratorExp { elt, generators } => todo!("GeneratorExp"),
+        ExprKind::Await { value } => todo!("Await"),
+        ExprKind::Yield { value } => todo!("Yield"),
+        ExprKind::YieldFrom { value } => todo!("YieldFrom"),
+        ExprKind::Compare { left, ops, comparators } => todo!("Compare"),
+        ExprKind::Call { func, args, keywords } => {
+            let func = get_name(*func)?;
+            let args = args.into_iter().map(parse_expression).collect::<ParseResult<Vec<_>>>()?;
+            let kwargs = keywords.into_iter().map(parse_kwargs).collect::<ParseResult<Vec<_>>>()?;
+            Ok(Expr::Call { func, args, kwargs })
+        },
+        ExprKind::FormattedValue { value, conversion, format_spec } => todo!("FormattedValue"),
+        ExprKind::JoinedStr { values } => todo!("JoinedStr"),
+        ExprKind::Constant { value, kind } => Ok(Expr::Constant(value)),
+        ExprKind::Attribute { value, attr, ctx } => todo!("Attribute"),
+        ExprKind::Subscript { value, slice, ctx } => todo!("Subscript"),
+        ExprKind::Starred { value, ctx } => todo!("Starred"),
+        ExprKind::Name { id, .. } => Ok(Expr::Name(id)),
+        ExprKind::List { elts, ctx } => todo!("List"),
+        ExprKind::Tuple { elts, ctx } => todo!("Tuple"),
+        ExprKind::Slice { lower, upper, step } => todo!("Slice"),
+    }
+}
+
+fn parse_kwargs(kwarg: Keyword) -> ParseResult<(String, Expr)> {
+    let key = match kwarg.node.arg {
+        Some(key) => key,
+        None => return Err("kwargs with no key".to_string()),
+    };
+    let value = parse_expression(kwarg.node.value)?;
+    Ok((key, value))
+}
+
+fn get_name(lhs: AstExpr) -> ParseResult<String> {
+    match lhs.node {
+        ExprKind::Name { id, .. } => Ok(id),
+        _ => Err(format!("Expected name, got {:?}", lhs.node)),
     }
 }
 
@@ -217,8 +188,4 @@ fn first<T: Debug>(v: Vec<T>) -> ParseResult<T> {
         return Err(format!("Expected 1 element, got {} (raw: {v:?})", v.len()));
     }
     v.into_iter().next().ok_or_else(|| "Expected 1 element, got 0".to_string())
-}
-
-fn prepare_str(s: PyString) -> ParseResult<String> {
-    s.content.into_string().map_err(|e| format!("{:?}", e))
 }
