@@ -1,10 +1,9 @@
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt;
-use std::rc::Rc;
 
 use crate::exceptions::{exc_err_fmt, ExcType, SimpleException};
+use crate::heap::HeapData;
 use crate::heap::{Heap, ObjectId};
 use crate::run::RunResult;
 use crate::{ParseError, ParseResult};
@@ -37,81 +36,8 @@ pub enum Object {
 
 impl fmt::Display for Object {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Undefined => write!(f, "Undefined"),
-            Self::Ellipsis => write!(f, "..."),
-            Self::None => write!(f, "None"),
-            Self::True => write!(f, "True"),
-            Self::False => write!(f, "False"),
-            Self::Int(v) => write!(f, "{v}"),
-            Self::Float(v) => write!(f, "{v}"),
-            Self::Range(size) => write!(f, "0:{size}"),
-            Self::Exc(exc) => write!(f, "{exc}"),
-            Self::Ref(id) => write!(f, "<Ref({id})>"),
-        }
+        write!(f, "{}", self.cow_str())
     }
-}
-
-// TODO move all these below Object impl
-fn format_iterable(start: char, end: char, items: &[Object], f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "{start}")?;
-    let mut items_iter = items.iter();
-    if let Some(first) = items_iter.next() {
-        write!(f, "{first}")?;
-        for item in items_iter {
-            write!(f, ", {item}")?;
-        }
-    }
-    write!(f, "{end}")
-}
-
-fn format_list_display(list: &Rc<RefCell<Vec<Object>>>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let borrow = list.borrow();
-    format_iterable('[', ']', &borrow, f)
-}
-
-fn format_list_repr(list: &Rc<RefCell<Vec<Object>>>) -> String {
-    let borrow = list.borrow();
-    let mut s = String::from("[");
-    let mut iter = borrow.iter();
-    if let Some(first) = iter.next() {
-        // Note: This will panic for Ref variants - only used during migration
-        s.push_str(&first.to_string());
-        for item in iter {
-            s.push_str(", ");
-            s.push_str(&item.to_string());
-        }
-    }
-    s.push(']');
-    s
-}
-
-fn format_heap_list_repr(items: &[Object], heap: &Heap) -> String {
-    let mut s = String::from("[");
-    let mut iter = items.iter();
-    if let Some(first) = iter.next() {
-        s.push_str(&first.repr(heap));
-        for item in iter {
-            s.push_str(", ");
-            s.push_str(&item.repr(heap));
-        }
-    }
-    s.push(']');
-    s
-}
-
-fn format_heap_tuple_repr(items: &[Object], heap: &Heap) -> String {
-    let mut s = String::from("(");
-    let mut iter = items.iter();
-    if let Some(first) = iter.next() {
-        s.push_str(&first.repr(heap));
-        for item in iter {
-            s.push_str(", ");
-            s.push_str(&item.repr(heap));
-        }
-    }
-    s.push(')');
-    s
 }
 
 impl PartialOrd for Object {
@@ -337,23 +263,35 @@ impl Object {
         }
     }
 
-    /// Returns a Python-style repr string for this object.
+    /// Returns a Python-style repr string for this object, e.g. `__repr__` / `repr`
     ///
     /// For heap-allocated objects, this method requires heap access to retrieve
     /// and format the actual data.
     #[must_use]
-    pub fn repr(&self, heap: &Heap) -> String {
-        use crate::heap::HeapData;
-
+    pub fn repr<'h>(&self, heap: &'h Heap) -> Cow<'h, str> {
         match self {
             Self::Ref(id) => match heap.get(*id) {
-                HeapData::Str(s) => string_repr(s),
-                HeapData::Bytes(b) => format!("b'{b:?}'"),
-                HeapData::List(items) => format_heap_list_repr(items, heap),
-                HeapData::Tuple(items) => format_heap_tuple_repr(items, heap),
+                HeapData::Str(s) => string_repr(s).into(),
+                HeapData::Bytes(b) => format!("b'{b:?}'").into(),
+                HeapData::List(items) => repr_sequence('[', ']', items, heap).into(),
+                HeapData::Tuple(items) => repr_sequence('(', ')', items, heap).into(),
             },
-            _ => self.to_string(),
+            _ => self.cow_str(),
         }
+    }
+
+    /// Implementation of Python's `__str__` / `str`.
+    ///
+    /// For heap-allocated objects, this method requires heap access to retrieve
+    /// and format the actual data.
+    #[must_use]
+    pub fn str<'h>(&self, heap: &'h Heap) -> Cow<'h, str> {
+        if let Self::Ref(id) = self {
+            if let HeapData::Str(s) = heap.get(*id) {
+                return Cow::Borrowed(s.as_str());
+            }
+        }
+        self.repr(heap)
     }
 
     /// TODO maybe replace with TryFrom
@@ -544,6 +482,21 @@ impl Object {
             Self::Ref(_) => unreachable!("Ref clones must go through clone_with_heap to maintain refcounts"),
         }
     }
+
+    fn cow_str(&self) -> Cow<'static, str> {
+        match self {
+            Self::Undefined => "Undefined".into(),
+            Self::Ellipsis => "...".into(),
+            Self::None => "None".into(),
+            Self::True => "True".into(),
+            Self::False => "False".into(),
+            Self::Int(v) => format!("{v}").into(),
+            Self::Float(v) => format!("{v}").into(),
+            Self::Range(size) => format!("0:{size}").into(),
+            Self::Exc(exc) => format!("{exc}").into(),
+            Self::Ref(id) => format!("<Ref({id})>").into(),
+        }
+    }
 }
 
 fn vecs_equal(v1: &[Object], v2: &[Object]) -> bool {
@@ -607,4 +560,18 @@ pub(crate) fn string_repr(s: &str) -> String {
         // Use single quotes by default, escape any single quotes in the string
         format!("'{}'", string_replace_common!(s.replace('\'', "\\'")))
     }
+}
+
+fn repr_sequence(start: char, end: char, items: &[Object], heap: &Heap) -> String {
+    let mut s = String::from(start);
+    let mut iter = items.iter();
+    if let Some(first) = iter.next() {
+        s.push_str(&first.repr(heap));
+        for item in iter {
+            s.push_str(", ");
+            s.push_str(&item.repr(heap));
+        }
+    }
+    s.push(end);
+    s
 }

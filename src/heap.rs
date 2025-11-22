@@ -10,7 +10,7 @@ pub enum HeapData {
     Bytes(Vec<u8>),
     List(Vec<Object>),
     Tuple(Vec<Object>),
-    // TODO: classes
+    // TODO: support arbitrary classes
 }
 
 /// A single entry inside the heap arena, storing refcount and payload.

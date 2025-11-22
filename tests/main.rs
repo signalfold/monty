@@ -67,7 +67,6 @@ macro_rules! execute_ok_tests {
 execute_ok_tests! {
     add_ints: "1 + 1", "Int(2)";
     add_strs: "'a' + 'b'", r#"Str("ab")"#;
-    // language=Python
     for_loop_str_append_assign_op: "
 v = ''
 for i in range(1000):
@@ -75,7 +74,6 @@ for i in range(1000):
         v += 'x'
 len(v)
 ", "Int(77)";
-    // language=Python
     for_loop_str_append_assign: "
 v = ''
 for i in range(1000):
@@ -83,13 +81,20 @@ for i in range(1000):
         v = v + 'x'
 len(v)
 ", "Int(77)";
-    // language=Python
     shared_list_append: "
 a = [1]
 b = a
 b.append(2)
 len(a)
 ", "Int(2)";
+    list_repr: "
+a = [1, 2, 3]
+repr(a)
+", "Str(\"[1, 2, 3]\")";
+list_str: "
+a = [1, 2, 3]
+str(a)
+", "Str(\"[1, 2, 3]\")";
 }
 
 macro_rules! execute_raise_tests {
