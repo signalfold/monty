@@ -1,0 +1,2 @@
+[] is []
+# Return=bool: False

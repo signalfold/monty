@@ -1,0 +1,2 @@
+'' + 'test'
+# Return.str=test
