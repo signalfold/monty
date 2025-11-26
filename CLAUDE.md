@@ -52,6 +52,8 @@ Avoid local imports, unless there's a very good reason, all imports should be at
 IMPORTANT: every struct, enum and function should be a comprehensive but concise docstring to
 explain what it does and why and any considerations or potential foot-guns of using that type.
 
+The only exception is trait implementation methods where a docstring is not necessary if the method is self-explanatory.
+
 Similarly, you should add lots of comments to code.
 
 If you see a comment or docstring that's out of date - you MUST update it to be correct.

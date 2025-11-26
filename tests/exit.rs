@@ -56,9 +56,9 @@ macro_rules! return_object_method_tests {
                     let result = ex.run(vec![]).unwrap();
                     match result {
                         Exit::Return(obj) => {
-                            assert_eq!(obj.str().as_ref(), $str_expected, "str() mismatch");
-                            assert_eq!(obj.repr().as_ref(), $repr_expected, "repr() mismatch");
-                            assert_eq!(obj.type_str(), $type_expected, "type_str() mismatch");
+                            assert_eq!(obj.py_str().as_ref(), $str_expected, "str() mismatch");
+                            assert_eq!(obj.py_repr().as_ref(), $repr_expected, "repr() mismatch");
+                            assert_eq!(obj.py_type(), $type_expected, "type_str() mismatch");
                         }
                         otherwise => panic!("Unexpected exit: {:?}", otherwise),
                     }

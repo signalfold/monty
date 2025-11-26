@@ -6,6 +6,7 @@ use crate::exceptions::{exc_err_fmt, ExcType, SimpleException};
 use crate::heap::HeapData;
 use crate::heap::{Heap, ObjectId};
 use crate::run::RunResult;
+use crate::values::PyValue;
 
 /// Primary value type representing Python objects at runtime.
 ///
@@ -54,116 +55,29 @@ impl From<bool> for Object {
     }
 }
 
-impl Object {
-    /// Performs addition on two objects, allocating result on heap if necessary.
-    ///
-    /// For heap-allocated objects (Ref variant), this method accesses the heap to perform
-    /// the operation and allocates the result on the heap with refcount=1.
-    #[must_use]
-    pub fn add(&self, other: &Self, heap: &mut Heap) -> Option<Self> {
-        use crate::heap::HeapData;
+impl PyValue for Object {
+    fn py_type(&self, heap: &Heap) -> &'static str {
+        match self {
+            Self::Undefined => "undefined",
+            Self::Ellipsis => "ellipsis",
+            Self::None => "NoneType",
+            Self::Bool(_) => "bool",
+            Self::Int(_) => "int",
+            Self::Float(_) => "float",
+            Self::Range(_) => "range",
+            Self::Exc(e) => e.type_str(),
+            Self::Ref(id) => heap.get(*id).py_type(heap),
+        }
+    }
 
-        match (self, other) {
-            // Immediate value addition
-            (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 + v2)),
-
-            // Heap-allocated object addition
-            (Self::Ref(id1), Self::Ref(id2)) => {
-                let data1 = heap.get(*id1);
-                let data2 = heap.get(*id2);
-                match (data1, data2) {
-                    (HeapData::Str(s1), HeapData::Str(s2)) => {
-                        let result = format!("{s1}{s2}");
-                        let id = heap.allocate(HeapData::Str(result));
-                        Some(Self::Ref(id))
-                    }
-                    (HeapData::List(list1), HeapData::List(list2)) => {
-                        // Clone the first list's items and extend with second list
-                        let mut result = list1.as_vec().clone();
-                        result.extend_from_slice(list2.as_vec());
-                        // Inc ref for all items in result (they're now referenced twice)
-                        for obj in &result {
-                            if let Self::Ref(id) = obj {
-                                heap.inc_ref(*id);
-                            }
-                        }
-                        let id = heap.allocate(HeapData::List(crate::types::List::from_vec(result)));
-                        Some(Self::Ref(id))
-                    }
-                    _ => None,
-                }
-            }
-
+    fn py_len(&self, heap: &Heap) -> Option<usize> {
+        match self {
+            Self::Ref(id) => heap.get(*id).py_len(heap),
             _ => None,
         }
     }
 
-    /// Performs in-place addition, mutating the left operand.
-    ///
-    /// For heap-allocated objects, this modifies the heap data directly.
-    /// Returns Ok(()) on success, or Err(other) if the operation is not supported.
-    pub fn add_mut(&mut self, other: Self, heap: &mut Heap) -> Result<(), Self> {
-        use crate::heap::HeapData;
-
-        match (self, other) {
-            // Immediate value mutation
-            (Self::Int(v1), Self::Int(v2)) => {
-                *v1 += v2;
-            }
-
-            // Heap-allocated object mutation
-            (Self::Ref(id1), Self::Ref(id2)) => {
-                // Clone the second object's data before mutating the first
-                let data2: HeapData = heap.get(id2).clone();
-
-                match heap.get_mut(*id1) {
-                    HeapData::Str(s1) => {
-                        if let HeapData::Str(s2) = data2 {
-                            s1.push_str(&s2);
-                        } else {
-                            return Err(Self::Ref(id2));
-                        }
-                    }
-                    HeapData::List(list1) => {
-                        if let HeapData::List(mut list2) = data2 {
-                            // Collect IDs to inc_ref after releasing the borrow
-                            let ids_to_inc: Vec<ObjectId> = list2
-                                .as_vec()
-                                .iter()
-                                .filter_map(|obj| if let Self::Ref(id) = obj { Some(*id) } else { None })
-                                .collect();
-                            // Extend list1 with list2 items by appending them individually
-                            list1.as_vec_mut().append(list2.as_vec_mut());
-                            // Release the mutable borrow
-                            let _ = list1;
-                            // Now inc_ref for all heap objects
-                            for id in ids_to_inc {
-                                heap.inc_ref(id);
-                            }
-                        } else {
-                            return Err(Self::Ref(id2));
-                        }
-                    }
-                    _ => return Err(Self::Ref(id2)),
-                }
-            }
-
-            (_, other) => return Err(other),
-        }
-        Ok(())
-    }
-
-    #[must_use]
-    pub fn sub(&self, other: &Self) -> Option<Self> {
-        match (self, other) {
-            (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 - v2)),
-            _ => None,
-        }
-    }
-
-    /// different name to avoid confusion with `PartialEq::eq`
-    #[must_use]
-    pub fn py_eq(&self, other: &Self, heap: &Heap) -> bool {
+    fn py_eq(&self, other: &Self, heap: &Heap) -> bool {
         match (self, other) {
             (Self::Undefined, _) => false,
             (_, Self::Undefined) => false,
@@ -178,16 +92,14 @@ impl Object {
         }
     }
 
-    /// Returns the truthiness of this object in Python semantics.
-    ///
-    /// For heap-allocated objects, this method requires heap access to check
-    /// if containers are empty.
-    #[must_use]
-    pub fn bool(&self, heap: &Heap) -> bool {
-        use crate::heap::HeapData;
+    fn py_dec_ref_ids(&self, stack: &mut Vec<ObjectId>) {
+        if let Object::Ref(id) = self {
+            stack.push(*id);
+        }
+    }
 
+    fn py_bool(&self, heap: &Heap) -> bool {
         match self {
-            // Immediate values
             Self::Undefined => false,
             Self::Ellipsis => true,
             Self::None => false,
@@ -196,18 +108,40 @@ impl Object {
             Self::Float(f) => *f != 0.0,
             Self::Range(v) => *v != 0,
             Self::Exc(_) => true,
-            Self::Ref(id) => match heap.get(*id) {
-                HeapData::Object(obj) => obj.as_ref().bool(heap),
-                HeapData::Str(s) => !s.is_empty(),
-                HeapData::Bytes(b) => !b.is_empty(),
-                HeapData::List(list) => !list.is_empty(),
-                HeapData::Tuple(items) => !items.is_empty(),
-            },
+            Self::Ref(id) => heap.get(*id).py_bool(heap),
         }
     }
 
-    #[must_use]
-    pub fn modulus(&self, other: &Self) -> Option<Self> {
+    fn py_repr<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
+        match self {
+            Self::Ref(id) => heap.get(*id).py_repr(heap),
+            _ => self.cow_str(),
+        }
+    }
+
+    fn py_str<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
+        match self {
+            Self::Ref(id) => heap.get(*id).py_str(heap),
+            _ => self.cow_str(),
+        }
+    }
+
+    fn py_add(&self, other: &Self, heap: &mut Heap) -> Option<Self> {
+        match (self, other) {
+            (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 + v2)),
+            (Self::Ref(id1), Self::Ref(id2)) => heap.with_two(*id1, *id2, |heap, left, right| left.py_add(right, heap)),
+            _ => None,
+        }
+    }
+
+    fn py_sub(&self, other: &Self, _heap: &mut Heap) -> Option<Self> {
+        match (self, other) {
+            (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 - v2)),
+            _ => None,
+        }
+    }
+
+    fn py_mod(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 % v2)),
             (Self::Float(v1), Self::Float(v2)) => Some(Self::Float(v1 % v2)),
@@ -217,8 +151,7 @@ impl Object {
         }
     }
 
-    #[must_use]
-    pub fn modulus_eq(&self, other: &Self, right_value: i64) -> Option<bool> {
+    fn py_mod_eq(&self, other: &Self, right_value: i64) -> Option<bool> {
         match (self, other) {
             (Self::Int(v1), Self::Int(v2)) => Some(v1 % v2 == right_value),
             (Self::Float(v1), Self::Float(v2)) => Some(v1 % v2 == right_value as f64),
@@ -228,57 +161,89 @@ impl Object {
         }
     }
 
-    /// Returns the length of this object if it has one.
-    ///
-    /// For heap-allocated objects, this method requires heap access to retrieve
-    /// the actual length.
-    #[allow(clippy::len_without_is_empty)]
-    #[must_use]
-    pub fn len(&self, heap: &Heap) -> Option<usize> {
-        use crate::heap::HeapData;
-
+    fn py_iadd(&mut self, other: Object, heap: &mut Heap, _self_id: Option<ObjectId>) -> Result<(), Object> {
         match self {
-            Self::Ref(id) => match heap.get(*id) {
-                HeapData::Object(obj) => obj.as_ref().len(heap),
-                HeapData::Str(s) => Some(s.len()),
-                HeapData::Bytes(b) => Some(b.len()),
-                HeapData::List(list) => Some(list.len()),
-                HeapData::Tuple(items) => Some(items.len()),
-            },
-            _ => None,
-        }
-    }
-
-    /// Returns a Python-style repr string for this object, e.g. `__repr__` / `repr`
-    ///
-    /// For heap-allocated objects, this method requires heap access to retrieve
-    /// and format the actual data.
-    #[must_use]
-    pub fn repr<'h>(&self, heap: &'h Heap) -> Cow<'h, str> {
-        match self {
-            Self::Ref(id) => match heap.get(*id) {
-                HeapData::Object(obj) => obj.as_ref().repr(heap),
-                HeapData::Str(s) => string_repr(s).into(),
-                HeapData::Bytes(b) => format!("b'{b:?}'").into(),
-                HeapData::List(list) => repr_sequence('[', ']', list.as_vec(), heap).into(),
-                HeapData::Tuple(items) => repr_sequence('(', ')', items, heap).into(),
-            },
-            _ => self.cow_str(),
-        }
-    }
-
-    /// Implementation of Python's `__str__` / `str`.
-    ///
-    /// For heap-allocated objects, this method requires heap access to retrieve
-    /// and format the actual data.
-    #[must_use]
-    pub fn str<'h>(&self, heap: &'h Heap) -> Cow<'h, str> {
-        if let Self::Ref(id) = self {
-            if let HeapData::Str(s) = heap.get(*id) {
-                return Cow::Borrowed(s.as_str());
+            Self::Int(v1) => {
+                if let Object::Int(v2) = other {
+                    *v1 += v2;
+                    Ok(())
+                } else {
+                    Err(other)
+                }
             }
+            Self::Ref(id) => {
+                let id = *id;
+                heap.with_entry_mut(id, |heap, data| data.py_iadd(other, heap, Some(id)))
+            }
+            _ => Err(other),
         }
-        self.repr(heap)
+    }
+}
+
+/// Implementation of AbstractValue for boxed Objects.
+///
+/// This is used for the `HeapData::Object` variant, which wraps immediate values
+/// that have been boxed to give them a stable heap identity (e.g., when `id()` is
+/// called on an int).
+impl PyValue for Box<Object> {
+    fn py_type(&self, heap: &Heap) -> &'static str {
+        self.as_ref().py_type(heap)
+    }
+
+    fn py_len(&self, heap: &Heap) -> Option<usize> {
+        // Boxed Objects don't have len - they're immediate values like Int, Bool
+        self.as_ref().py_len(heap)
+    }
+
+    fn py_eq(&self, other: &Self, heap: &Heap) -> bool {
+        self.as_ref().py_eq(other, heap)
+    }
+
+    fn py_dec_ref_ids(&self, stack: &mut Vec<ObjectId>) {
+        self.as_ref().py_dec_ref_ids(stack);
+    }
+
+    fn py_bool(&self, heap: &Heap) -> bool {
+        self.as_ref().py_bool(heap)
+    }
+
+    fn py_repr<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
+        self.as_ref().py_repr(heap)
+    }
+
+    fn py_str<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
+        self.as_ref().py_str(heap)
+    }
+
+    fn py_add(&self, other: &Self, heap: &mut Heap) -> Option<Object> {
+        self.as_ref().py_add(other, heap)
+    }
+
+    fn py_sub(&self, other: &Self, heap: &mut Heap) -> Option<Object> {
+        self.as_ref().py_sub(other, heap)
+    }
+
+    fn py_mod(&self, other: &Self) -> Option<Object> {
+        self.as_ref().py_mod(other)
+    }
+
+    fn py_mod_eq(&self, other: &Self, right_value: i64) -> Option<bool> {
+        self.as_ref().py_mod_eq(other, right_value)
+    }
+
+    fn py_iadd(&mut self, other: Object, heap: &mut Heap, self_id: Option<ObjectId>) -> Result<(), Object> {
+        PyValue::py_iadd(self.as_mut(), other, heap, self_id)
+    }
+
+    fn py_call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, args: Vec<Object>) -> RunResult<'c, Object> {
+        self.as_mut().py_call_attr(heap, attr, args)
+    }
+}
+
+impl Object {
+    /// Performs Python `__iadd__`, mutating the left operand when possible.
+    pub fn py_iadd(&mut self, other: Self, heap: &mut Heap) -> Result<(), Self> {
+        PyValue::py_iadd(self, other, heap, None)
     }
 
     /// Returns a stable, unique identifier for this object, boxing it to the heap if necessary.
@@ -328,25 +293,6 @@ impl Object {
         }
     }
 
-    /// Returns the Python type name for this object.
-    ///
-    /// For heap-allocated objects (Ref variant), this method requires heap access
-    /// to determine the type.
-    #[must_use]
-    pub fn type_str(&self, heap: &Heap) -> &'static str {
-        match self {
-            Self::Undefined => "undefined",
-            Self::Ellipsis => "ellipsis",
-            Self::None => "NoneType",
-            Self::Bool(_) => "bool",
-            Self::Int(_) => "int",
-            Self::Float(_) => "float",
-            Self::Range(_) => "range",
-            Self::Exc(e) => e.type_str(),
-            Self::Ref(id) => heap.get(*id).type_str(heap),
-        }
-    }
-
     /// Calls an attribute method on this object (e.g., list.append()).
     ///
     /// This method requires heap access to work with heap-allocated objects and
@@ -355,7 +301,7 @@ impl Object {
         if let Self::Ref(id) = self {
             heap.call_attr(*id, attr, args)
         } else {
-            Err(ExcType::attribute_error(self.type_str(heap), attr))
+            Err(ExcType::attribute_error(self.py_type(heap), attr))
         }
     }
 
@@ -478,14 +424,16 @@ pub fn string_repr(s: &str) -> String {
     }
 }
 
-fn repr_sequence(start: char, end: char, items: &[Object], heap: &Heap) -> String {
+pub fn repr_sequence(start: char, end: char, items: &[Object], heap: &Heap) -> String {
     let mut s = String::from(start);
     let mut iter = items.iter();
     if let Some(first) = iter.next() {
-        s.push_str(&first.repr(heap));
+        let repr = first.py_repr(heap);
+        s.push_str(repr.as_ref());
         for item in iter {
             s.push_str(", ");
-            s.push_str(&item.repr(heap));
+            let repr = item.py_repr(heap);
+            s.push_str(repr.as_ref());
         }
     }
     s.push(end);

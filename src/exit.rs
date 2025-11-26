@@ -1,6 +1,7 @@
 use std::{borrow::Cow, fmt};
 
 use crate::heap::HeapData;
+use crate::values::PyValue;
 use crate::{exceptions::ExceptionRaise, expressions::FrameExit, heap::Heap, object::Object};
 
 #[derive(Debug)]
@@ -43,27 +44,27 @@ pub struct Value<'h> {
 
 impl fmt::Display for Value<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.str())
+        write!(f, "{}", self.py_str())
     }
 }
 
 impl<'h> Value<'h> {
     /// User facing representation of the object, should match python's `str(object)`
     #[must_use]
-    pub fn str(&self) -> Cow<'h, str> {
-        self.object.str(self.heap)
+    pub fn py_str(&'h self) -> Cow<'h, str> {
+        self.object.py_str(self.heap)
     }
 
     /// Debug representation of the object, should match python's `repr(object)`
     #[must_use]
-    pub fn repr(&self) -> Cow<'h, str> {
-        self.object.repr(self.heap)
+    pub fn py_repr(&'h self) -> Cow<'h, str> {
+        self.object.py_repr(self.heap)
     }
 
     /// User facing representation of the object type, should roughly match `str(type(object))
     #[must_use]
-    pub fn type_str(&self) -> &'static str {
-        self.object.type_str(self.heap)
+    pub fn py_type(&self) -> &'static str {
+        self.object.py_type(self.heap)
     }
 
     /// Checks if the return object is None
@@ -108,7 +109,7 @@ impl TryFrom<&Value<'_>> for i64 {
     fn try_from(value: &Value<'_>) -> Result<Self, Self::Error> {
         match value.object {
             Object::Int(i) => Ok(i),
-            _ => Err(ConversionError::new("int", value.type_str())),
+            _ => Err(ConversionError::new("int", value.py_type())),
         }
     }
 }
@@ -123,7 +124,7 @@ impl TryFrom<&Value<'_>> for f64 {
         match value.object {
             Object::Float(f) => Ok(f),
             Object::Int(i) => Ok(i as f64),
-            _ => Err(ConversionError::new("float", value.type_str())),
+            _ => Err(ConversionError::new("float", value.py_type())),
         }
     }
 }
@@ -136,10 +137,10 @@ impl TryFrom<&Value<'_>> for String {
     fn try_from(value: &Value<'_>) -> Result<Self, Self::Error> {
         if let Object::Ref(id) = value.object {
             if let HeapData::Str(s) = value.heap.get(id) {
-                return Ok(s.clone());
+                return Ok(s.clone().into());
             }
         }
-        Err(ConversionError::new("str", value.type_str()))
+        Err(ConversionError::new("str", value.py_type()))
     }
 }
 
@@ -152,7 +153,7 @@ impl TryFrom<&Value<'_>> for bool {
     fn try_from(value: &Value<'_>) -> Result<Self, Self::Error> {
         match value.object {
             Object::Bool(b) => Ok(b),
-            _ => Err(ConversionError::new("bool", value.type_str())),
+            _ => Err(ConversionError::new("bool", value.py_type())),
         }
     }
 }

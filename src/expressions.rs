@@ -183,8 +183,8 @@ impl Const {
             Self::Bool(b) => Object::Bool(*b),
             Self::Int(v) => Object::Int(*v),
             Self::Float(v) => Object::Float(*v),
-            Self::Str(s) => Object::Ref(heap.allocate(HeapData::Str(s.clone()))),
-            Self::Bytes(b) => Object::Ref(heap.allocate(HeapData::Bytes(b.clone()))),
+            Self::Str(s) => Object::Ref(heap.allocate(HeapData::Str(s.clone().into()))),
+            Self::Bytes(b) => Object::Ref(heap.allocate(HeapData::Bytes(b.clone().into()))),
         }
     }
 

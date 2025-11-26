@@ -4,6 +4,7 @@ use crate::exceptions::{exc_err_fmt, internal_err, ExcType, InternalRunError, Si
 use crate::heap::Heap;
 use crate::parse_error::{ParseError, ParseResult};
 use crate::run::RunResult;
+use crate::values::PyValue;
 use crate::{HeapData, Object};
 
 #[derive(Debug, Clone)]
@@ -59,9 +60,9 @@ impl Types {
             Self::BuiltinFunction(Builtins::Print) => {
                 for (i, object) in args.iter().enumerate() {
                     if i == 0 {
-                        print!("{}", object.str(heap));
+                        print!("{}", object.py_str(heap));
                     } else {
-                        print!(" {}", object.str(heap));
+                        print!(" {}", object.py_str(heap));
                     }
                 }
                 println!();
@@ -72,9 +73,9 @@ impl Types {
                     return exc_err_fmt!(ExcType::TypeError; "len() takes exactly exactly one argument ({} given)", args.len());
                 }
                 let object = &args[0];
-                match object.len(heap) {
+                match object.py_len(heap) {
                     Some(len) => Ok(Object::Int(len as i64)),
-                    None => exc_err_fmt!(ExcType::TypeError; "Object of type {} has no len()", object.repr(heap)),
+                    None => exc_err_fmt!(ExcType::TypeError; "Object of type {} has no len()", object.py_repr(heap)),
                 }
             }
             Self::BuiltinFunction(Builtins::Str) => {
@@ -82,7 +83,7 @@ impl Types {
                     return exc_err_fmt!(ExcType::TypeError; "str() takes exactly exactly one argument ({} given)", args.len());
                 }
                 let object = &args[0];
-                let object_id = heap.allocate(HeapData::Str(object.str(heap).into_owned()));
+                let object_id = heap.allocate(HeapData::Str(object.py_str(heap).into_owned().into()));
                 Ok(Object::Ref(object_id))
             }
             Self::BuiltinFunction(Builtins::Repr) => {
@@ -90,7 +91,7 @@ impl Types {
                     return exc_err_fmt!(ExcType::TypeError; "repr() takes exactly exactly one argument ({} given)", args.len());
                 }
                 let object = &args[0];
-                let object_id = heap.allocate(HeapData::Str(object.repr(heap).into_owned()));
+                let object_id = heap.allocate(HeapData::Str(object.py_repr(heap).into_owned().into()));
                 Ok(Object::Ref(object_id))
             }
             Self::BuiltinFunction(Builtins::Id) => {
@@ -107,7 +108,10 @@ impl Types {
                     if args.len() == 1 {
                         if let Object::Ref(object_id) = &first {
                             if let HeapData::Str(s) = heap.get(*object_id) {
-                                return Ok(Object::Exc(SimpleException::new(*exc_type, Some(s.to_owned().into()))));
+                                return Ok(Object::Exc(SimpleException::new(
+                                    *exc_type,
+                                    Some(s.as_str().to_owned().into()),
+                                )));
                             }
                         }
                     }

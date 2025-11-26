@@ -247,7 +247,7 @@ pub fn execute(frame: &mut RunFrame<'c>, nodes: &[Node<'c>]) -> RunResult<'c, ()
 **Statement Handlers:**
 
 - **Assign**: `namespace[target_id] = evaluate(value)?`
-- **OpAssign**: `namespace[id].add_mut(evaluate(value)?)` for `x += value`
+- **OpAssign**: `namespace[id].py_iadd(evaluate(value)?)` for `x += value`
 - **For**: Clone iterator, loop over elements, execute body
 - **If**: Evaluate test, execute appropriate branch
 - **Return/Raise**: Create `Exit` and bubble up
@@ -434,7 +434,7 @@ struct NameTracker {
 
 **Methods:**
 - Operators: `add()`, `sub()`, `modulus()`, etc.
-- Mutations: `add_mut()` for `+=` operations
+- Mutations: `py_iadd()` for `+=` operations
 - Comparisons: `py_eq()`, `lt()`, `gt()`, etc. (via `PartialOrd`)
 - Utilities: `bool()`, `repr()`, `Display`
 - Attribute calls: `attr_call()` dispatches to methods like `list_append()`

@@ -5,6 +5,7 @@ use crate::expressions::ExprLoc;
 use crate::object::{string_repr, Attr, Object};
 use crate::parse::CodeRange;
 use crate::run::RunResult;
+use crate::values::PyValue;
 use crate::Heap;
 
 #[allow(clippy::enum_variant_names)]
@@ -91,8 +92,8 @@ impl SimpleException {
         right_object: Object,
         heap: &Heap,
     ) -> RunResult<'c, T> {
-        let left_type = left_object.type_str(heap);
-        let right_type = right_object.type_str(heap);
+        let left_type = left_object.py_type(heap);
+        let right_type = right_object.py_type(heap);
         let new_position = left.position.extend(&right.position);
         Err(
             exc_fmt!(ExcType::TypeError; "unsupported operand type(s) for {op}: '{left_type}' and '{right_type}'")

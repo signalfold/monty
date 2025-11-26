@@ -7,6 +7,7 @@ use crate::heap::Heap;
 use crate::object::Object;
 use crate::operators::Operator;
 use crate::parse::CodeRange;
+use crate::values::PyValue;
 
 pub type RunResult<'c, T> = Result<T, RunError<'c>>;
 
@@ -116,12 +117,12 @@ impl<'c> RunFrame<'c> {
         let right_object = self.execute_expr(heap, expr)?;
         if let Some(target_object) = self.namespace.get_mut(target.id) {
             let r = match op {
-                Operator::Add => target_object.add_mut(right_object, heap),
+                Operator::Add => target_object.py_iadd(right_object, heap),
                 _ => return internal_err!(InternalRunError::TodoError; "Assign operator {op:?} not yet implemented"),
             };
             if let Err(right) = r {
-                let target_type = target_object.repr(heap);
-                let right_type = right.repr(heap);
+                let target_type = target_object.py_repr(heap);
+                let right_type = right.py_repr(heap);
                 let e = exc_fmt!(ExcType::TypeError; "unsupported operand type(s) for {op}: '{target_type}' and '{right_type}'");
                 Err(e.with_frame(self.stack_frame(&expr.position)).into())
             } else {

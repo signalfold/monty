@@ -10,7 +10,7 @@ mod parse;
 mod parse_error;
 mod prepare;
 mod run;
-mod types;
+mod values;
 
 use crate::exceptions::{InternalRunError, RunError};
 pub use crate::exit::{Exit, Value};

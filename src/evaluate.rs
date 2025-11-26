@@ -4,7 +4,7 @@ use crate::heap::Heap;
 use crate::object::{Attr, Object};
 use crate::operators::{CmpOperator, Operator};
 use crate::run::RunResult;
-use crate::types::List;
+use crate::values::{List, PyValue};
 use crate::HeapData;
 
 /// Evaluates an expression node and returns a value.
@@ -119,7 +119,7 @@ pub(crate) fn evaluate_bool<'c, 'd>(
         cmp_op(namespace, heap, left, op, right)
     } else {
         let obj = evaluate_use(namespace, heap, expr_loc)?;
-        Ok(obj.bool(heap))
+        Ok(obj.py_bool(heap))
     }
 }
 
@@ -134,9 +134,9 @@ fn eval_op<'c, 'd>(
     let left_object = evaluate_use(namespace, heap, left)?;
     let right_object = evaluate_use(namespace, heap, right)?;
     let op_object: Option<Object> = match op {
-        Operator::Add => left_object.add(&right_object, heap),
-        Operator::Sub => left_object.sub(&right_object),
-        Operator::Mod => left_object.modulus(&right_object),
+        Operator::Add => left_object.py_add(&right_object, heap),
+        Operator::Sub => left_object.py_sub(&right_object, heap),
+        Operator::Mod => left_object.py_mod(&right_object),
         _ => return internal_err!(InternalRunError::TodoError; "Operator {op:?} not yet implemented"),
     };
     match op_object {
@@ -164,7 +164,7 @@ fn cmp_op<'c, 'd>(
         CmpOperator::LtE => Ok(left_object.le(&right_object)),
         CmpOperator::Is => Ok(left_object.is(heap, &mut right_object)),
         CmpOperator::IsNot => Ok(!left_object.is(heap, &mut right_object)),
-        CmpOperator::ModEq(v) => match left_object.modulus_eq(&right_object, *v) {
+        CmpOperator::ModEq(v) => match left_object.py_mod_eq(&right_object, *v) {
             Some(b) => Ok(b),
             None => SimpleException::operand_type_error(left, Operator::Mod, right, left_object, right_object, heap),
         },

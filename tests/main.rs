@@ -29,7 +29,7 @@ macro_rules! execute_ok_tests {
                     let mut ex = Executor::new($code, "test.py", &[]).unwrap();
                     let result = ex.run(vec![]);
                     let output = match result {
-                        Ok(Exit::Return(obj)) => format!("{}: {}", obj.type_str(), obj.repr()),
+                        Ok(Exit::Return(obj)) => format!("{}: {}", obj.py_type(), obj.py_repr()),
                         otherwise => panic!("Unexpected exit: {:?}", otherwise),
                     };
                     let expected = $expected.trim_matches('\n');

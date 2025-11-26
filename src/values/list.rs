@@ -1,7 +1,10 @@
+use std::borrow::Cow;
+
 use crate::exceptions::{exc_err_fmt, ExcType};
-use crate::heap::{Heap, ObjectId};
-use crate::object::{Attr, Object};
+use crate::heap::{Heap, HeapData, ObjectId};
+use crate::object::{repr_sequence, Attr, Object};
 use crate::run::RunResult;
+use crate::values::PyValue;
 
 /// Python list type, wrapping a Vec of Objects.
 ///
@@ -41,12 +44,6 @@ impl List {
         &mut self.0
     }
 
-    /// Consumes the list and returns the underlying vector.
-    #[must_use]
-    pub fn into_vec(self) -> Vec<Object> {
-        self.0
-    }
-
     /// Returns the number of elements in the list.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -57,10 +54,6 @@ impl List {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-
-    pub fn py_eq(&self, other: &Self, heap: &Heap) -> bool {
-        self.len() == other.len() && self.0.iter().zip(&other.0).all(|(i1, i2)| i1.py_eq(i2, heap))
     }
 
     /// Appends an element to the end of the list.
@@ -103,10 +96,28 @@ impl List {
 
         Object::None
     }
+}
 
-    /// Add to a stack of ids for for `dec_ref`
-    pub fn push_stack_ids(&self, stack: &mut Vec<ObjectId>) {
-        // Walk through all items and enqueue any heap-allocated objects
+impl From<List> for Vec<Object> {
+    fn from(list: List) -> Self {
+        list.0
+    }
+}
+
+impl PyValue for List {
+    fn py_type(&self, _heap: &Heap) -> &'static str {
+        "list"
+    }
+
+    fn py_len(&self, _heap: &Heap) -> Option<usize> {
+        Some(self.0.len())
+    }
+
+    fn py_eq(&self, other: &Self, heap: &Heap) -> bool {
+        self.0.len() == other.0.len() && self.0.iter().zip(&other.0).all(|(i1, i2)| i1.py_eq(i2, heap))
+    }
+
+    fn py_dec_ref_ids(&self, stack: &mut Vec<ObjectId>) {
         for obj in &self.0 {
             if let Object::Ref(id) = obj {
                 stack.push(*id);
@@ -114,24 +125,51 @@ impl List {
         }
     }
 
-    /// Calls an attribute method on this list (e.g., list.append()).
-    ///
-    /// This method dispatches to the appropriate list method based on the
-    /// attribute name, handling argument validation and conversion.
-    ///
-    /// # Arguments
-    /// * `heap` - Mutable reference to the heap for reference counting
-    /// * `attr` - The attribute/method being called
-    /// * `args` - Vector of arguments passed to the method
-    ///
-    /// # Returns
-    /// * `Ok(Object)` - The result of the method call (typically None)
-    /// * `Err(SimpleException)` - If the attribute doesn't exist or arguments are invalid
-    ///
-    /// # Supported Methods
-    /// * `append(item)` - Appends item to the end of the list
-    /// * `insert(index, item)` - Inserts item at the specified index
-    pub fn call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, args: Vec<Object>) -> RunResult<'c, Object> {
+    fn py_bool(&self, _heap: &Heap) -> bool {
+        !self.0.is_empty()
+    }
+
+    fn py_repr<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
+        Cow::Owned(repr_sequence('[', ']', &self.0, heap))
+    }
+
+    fn py_add(&self, other: &Self, heap: &mut Heap) -> Option<Object> {
+        let mut result = self.0.clone();
+        result.extend_from_slice(other.as_vec());
+        for obj in &result {
+            if let Object::Ref(id) = obj {
+                heap.inc_ref(*id);
+            }
+        }
+        let id = heap.allocate(HeapData::List(List::from_vec(result)));
+        Some(Object::Ref(id))
+    }
+
+    fn py_iadd(&mut self, other: Object, heap: &mut Heap, self_id: Option<ObjectId>) -> Result<(), Object> {
+        let rhs = match other {
+            Object::Ref(other_id) => {
+                if Some(other_id) == self_id {
+                    self.0.clone()
+                } else if let HeapData::List(list) = heap.get(other_id) {
+                    list.as_vec().clone()
+                } else {
+                    return Err(Object::Ref(other_id));
+                }
+            }
+            _ => return Err(other),
+        };
+
+        for obj in &rhs {
+            if let Object::Ref(id) = obj {
+                heap.inc_ref(*id);
+            }
+        }
+
+        self.0.extend(rhs);
+        Ok(())
+    }
+
+    fn py_call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, args: Vec<Object>) -> RunResult<'c, Object> {
         match attr {
             Attr::Append => {
                 if args.len() != 1 {
