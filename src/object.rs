@@ -403,39 +403,3 @@ impl From<String> for Attr {
         }
     }
 }
-
-macro_rules! string_replace_common {
-    ($s:expr) => {
-        $s.replace('\\', "\\\\")
-            .replace('\n', "\\n")
-            .replace('\t', "\\t")
-            .replace('\r', "\\r")
-    };
-}
-
-pub fn string_repr(s: &str) -> String {
-    // Check if the string contains single quotes but not double quotes
-    if s.contains('\'') && !s.contains('"') {
-        // Use double quotes if string contains only single quotes
-        format!("\"{}\"", string_replace_common!(s))
-    } else {
-        // Use single quotes by default, escape any single quotes in the string
-        format!("'{}'", string_replace_common!(s.replace('\'', "\\'")))
-    }
-}
-
-pub fn repr_sequence(start: char, end: char, items: &[Object], heap: &Heap) -> String {
-    let mut s = String::from(start);
-    let mut iter = items.iter();
-    if let Some(first) = iter.next() {
-        let repr = first.py_repr(heap);
-        s.push_str(repr.as_ref());
-        for item in iter {
-            s.push_str(", ");
-            let repr = item.py_repr(heap);
-            s.push_str(repr.as_ref());
-        }
-    }
-    s.push(end);
-    s
-}

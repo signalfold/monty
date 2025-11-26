@@ -3,9 +3,10 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::expressions::ExprLoc;
-use crate::object::{string_repr, Attr, Object};
+use crate::object::{Attr, Object};
 use crate::parse::CodeRange;
 use crate::run::RunResult;
+use crate::values::str::string_repr;
 use crate::values::PyValue;
 use crate::Heap;
 

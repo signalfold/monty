@@ -6,7 +6,7 @@ use std::borrow::Cow;
 
 use crate::exceptions::ExcType;
 use crate::heap::{Heap, HeapData, ObjectId};
-use crate::object::{string_repr, Attr, Object};
+use crate::object::{Attr, Object};
 use crate::run::RunResult;
 use crate::values::PyValue;
 
@@ -118,5 +118,35 @@ impl PyValue for Str {
 
     fn py_call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, _args: Vec<Object>) -> RunResult<'c, Object> {
         Err(ExcType::attribute_error(self.py_type(heap), attr))
+    }
+}
+
+/// Macro for common string escape replacements used in repr formatting.
+///
+/// Replaces backslash, newline, tab, and carriage return with their escaped forms.
+macro_rules! string_replace_common {
+    ($s:expr) => {
+        $s.replace('\\', "\\\\")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t")
+            .replace('\r', "\\r")
+    };
+}
+
+/// Returns a Python repr() string for a given string slice.
+///
+/// Chooses between single and double quotes based on the string content:
+/// - Uses double quotes if the string contains single quotes but not double quotes
+/// - Uses single quotes by default, escaping any contained single quotes
+///
+/// Common escape sequences (backslash, newline, tab, carriage return) are always escaped.
+pub fn string_repr(s: &str) -> String {
+    // Check if the string contains single quotes but not double quotes
+    if s.contains('\'') && !s.contains('"') {
+        // Use double quotes if string contains only single quotes
+        format!("\"{}\"", string_replace_common!(s))
+    } else {
+        // Use single quotes by default, escape any single quotes in the string
+        format!("'{}'", string_replace_common!(s.replace('\'', "\\'")))
     }
 }

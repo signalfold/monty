@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use crate::exceptions::{exc_err_fmt, ExcType};
 use crate::heap::{Heap, HeapData, ObjectId};
-use crate::object::{repr_sequence, Attr, Object};
+use crate::object::{Attr, Object};
 use crate::run::RunResult;
 use crate::values::PyValue;
 
@@ -203,4 +203,33 @@ impl PyValue for List {
             }
         }
     }
+}
+
+/// Formats a sequence of objects with the given start and end characters.
+///
+/// This helper function is used to implement `__repr__` for sequence types like
+/// lists and tuples. It formats items as comma-separated repr strings.
+///
+/// # Arguments
+/// * `start` - The opening character (e.g., '[' for lists, '(' for tuples)
+/// * `end` - The closing character (e.g., ']' for lists, ')' for tuples)
+/// * `items` - The slice of objects to format
+/// * `heap` - The heap for resolving object references
+///
+/// # Returns
+/// A string representation like "[1, 2, 3]" or "(1, 2, 3)"
+pub(crate) fn repr_sequence(start: char, end: char, items: &[Object], heap: &Heap) -> String {
+    let mut s = String::from(start);
+    let mut iter = items.iter();
+    if let Some(first) = iter.next() {
+        let repr = first.py_repr(heap);
+        s.push_str(repr.as_ref());
+        for item in iter {
+            s.push_str(", ");
+            let repr = item.py_repr(heap);
+            s.push_str(repr.as_ref());
+        }
+    }
+    s.push(end);
+    s
 }

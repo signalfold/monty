@@ -7,8 +7,9 @@ use std::borrow::Cow;
 
 use crate::exceptions::ExcType;
 use crate::heap::{Heap, ObjectId};
-use crate::object::{repr_sequence, Attr, Object};
+use crate::object::{Attr, Object};
 use crate::run::RunResult;
+use crate::values::list::repr_sequence;
 use crate::values::PyValue;
 
 /// Python tuple value stored on the heap.
