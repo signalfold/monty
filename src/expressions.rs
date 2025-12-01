@@ -1,18 +1,19 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::args::ArgExprs;
 use crate::builtins::Builtins;
 use crate::exceptions::{ExcType, ExceptionRaise};
-use crate::heap::{Heap, HeapData};
 use crate::object::{Attr, Object};
 use crate::operators::{CmpOperator, Operator};
 use crate::parse::CodeRange;
-use crate::ParseResult;
+use crate::values::bytes::bytes_repr;
+use crate::values::str::string_repr;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Identifier<'c> {
     pub position: CodeRange<'c>,
-    pub name: String, // TODO could this a `&'c str` or cow?
+    pub name: String,
     pub id: usize,
 }
 
@@ -76,12 +77,12 @@ pub(crate) enum Expr<'c> {
     Name(Identifier<'c>),
     Call {
         callable: Callable<'c>,
-        args: ArgsExpr<'c>,
+        args: ArgExprs<'c>,
     },
     AttrCall {
         object: Identifier<'c>,
         attr: Attr,
-        args: ArgsExpr<'c>,
+        args: ArgExprs<'c>,
     },
     Op {
         left: Box<ExprLoc<'c>>,
@@ -105,7 +106,7 @@ pub(crate) enum Expr<'c> {
 impl fmt::Display for Expr<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Constant(object) => write!(f, "{}", object.repr()),
+            Self::Constant(object) => write!(f, "{object}"),
             Self::Name(identifier) => write!(f, "{}", identifier.name),
             Self::Call { callable, args } => write!(f, "{callable}{args}"),
             Self::AttrCall { object, attr, args } => write!(f, "{}.{}{}", object.name, attr, args),
@@ -162,7 +163,6 @@ impl Expr<'_> {
 /// can't always be recorded as constants.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Const {
-    Undefined,
     Ellipsis,
     None,
     Bool(bool),
@@ -176,39 +176,31 @@ impl Const {
     /// Converts the literal into its runtime `Object` counterpart.
     ///
     /// This is the only place parse-time data crosses the boundary into runtime
-    /// semantics, ensuring every literal follows the same conversion path (helpful
-    /// for keeping later heap/refcount logic centralized).
-    ///
-    /// Heap-allocated types (Str, Bytes, Tuple) will be allocated on the heap and
-    /// returned as `Object::Ref` variants. Immediate values are returned inline.
-    pub fn to_object(&self, heap: &mut Heap) -> Object {
+    /// semantics, ensuring every literal follows the same conversion path.
+    pub fn to_object(&self) -> Object<'_> {
         match self {
-            Self::Undefined => Object::Undefined,
             Self::Ellipsis => Object::Ellipsis,
             Self::None => Object::None,
             Self::Bool(b) => Object::Bool(*b),
             Self::Int(v) => Object::Int(*v),
             Self::Float(v) => Object::Float(*v),
-            Self::Str(s) => Object::Ref(heap.allocate(HeapData::Str(s.clone().into()))),
-            Self::Bytes(b) => Object::Ref(heap.allocate(HeapData::Bytes(b.clone().into()))),
+            Self::Str(s) => Object::InternString(s),
+            Self::Bytes(b) => Object::InternBytes(b),
         }
     }
+}
 
-    /// Returns a Python-esque string representation for logging/debugging.
-    ///
-    /// This avoids the need to import runtime formatting helpers into parser code
-    /// while still giving enough fidelity to display constants in errors/traces.
-    pub fn repr(&self) -> String {
+impl fmt::Display for Const {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Undefined => "Undefined".to_string(),
-            Self::Ellipsis => "...".to_string(),
-            Self::None => "None".to_string(),
-            Self::Bool(true) => "True".to_string(),
-            Self::Bool(false) => "False".to_string(),
-            Self::Int(v) => v.to_string(),
-            Self::Float(v) => v.to_string(),
-            Self::Str(v) => format!("'{v}'"),
-            Self::Bytes(v) => format!("b'{v:?}'"),
+            Self::Ellipsis => write!(f, "..."),
+            Self::None => write!(f, "None"),
+            Self::Bool(true) => write!(f, "True"),
+            Self::Bool(false) => write!(f, "False"),
+            Self::Int(v) => write!(f, "{v}"),
+            Self::Float(v) => write!(f, "{v}"),
+            Self::Str(v) => write!(f, "{}", string_repr(v)),
+            Self::Bytes(v) => write!(f, "{}", bytes_repr(v)),
         }
     }
 }
@@ -231,8 +223,6 @@ impl<'c> ExprLoc<'c> {
         Self { position, expr }
     }
 }
-
-// TODO need a new AssignTo (enum of identifier, tuple) type used for "Assign" and "For"
 
 #[derive(Debug, Clone)]
 pub(crate) enum Node<'c> {
@@ -269,138 +259,9 @@ pub(crate) enum Node<'c> {
 }
 
 #[derive(Debug)]
-pub enum FrameExit<'c> {
-    Return(Object),
+pub enum FrameExit<'c, 'e> {
+    Return(Object<'e>),
     // Yield(Object),
     #[allow(dead_code)] // Planned for future use
     Raise(ExceptionRaise<'c>),
-}
-
-#[derive(Debug, Clone)]
-pub struct Kwarg<'c> {
-    pub key: Identifier<'c>,
-    pub value: ExprLoc<'c>,
-}
-
-#[derive(Debug, Clone)]
-pub enum ArgsExpr<'c> {
-    Zero,
-    One(Box<ExprLoc<'c>>),
-    Two(Box<ExprLoc<'c>>, Box<ExprLoc<'c>>),
-    Args(Vec<ExprLoc<'c>>),
-    Kwargs(Vec<Kwarg<'c>>),
-    ArgsKargs {
-        args: Vec<ExprLoc<'c>>,
-        kwargs: Vec<Kwarg<'c>>,
-    },
-}
-
-impl fmt::Display for ArgsExpr<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(")?;
-        match self {
-            Self::Zero => {}
-            Self::One(arg) => write!(f, "{arg}")?,
-            Self::Two(arg1, arg2) => write!(f, "{arg1}, {arg2}")?,
-            Self::Args(args) => {
-                for (index, arg) in args.iter().enumerate() {
-                    if index == 0 {
-                        write!(f, "{arg}")?;
-                    } else {
-                        write!(f, ", {arg}")?;
-                    }
-                }
-            }
-            Self::Kwargs(kwargs) => {
-                for (index, kwarg) in kwargs.iter().enumerate() {
-                    if index == 0 {
-                        write!(f, "{}={}", kwarg.key.name, kwarg.value)?;
-                    } else {
-                        write!(f, ", {}={}", kwarg.key.name, kwarg.value)?;
-                    }
-                }
-            }
-            Self::ArgsKargs { args, kwargs } => {
-                for (index, arg) in args.iter().enumerate() {
-                    if index == 0 {
-                        write!(f, "{arg}")?;
-                    } else {
-                        write!(f, ", {arg}")?;
-                    }
-                }
-                for kwarg in kwargs {
-                    write!(f, ", {}={}", kwarg.key.name, kwarg.value)?;
-                }
-            }
-        }
-        write!(f, ")")
-    }
-}
-
-impl<'c> ArgsExpr<'c> {
-    pub fn new(args: Vec<ExprLoc<'c>>, kwargs: Vec<Kwarg<'c>>) -> Self {
-        if !kwargs.is_empty() {
-            if args.is_empty() {
-                Self::Kwargs(kwargs)
-            } else {
-                Self::ArgsKargs { args, kwargs }
-            }
-        } else if args.len() > 2 {
-            Self::Args(args)
-        } else {
-            let mut iter = args.into_iter();
-            if let Some(first) = iter.next() {
-                if let Some(second) = iter.next() {
-                    Self::Two(Box::new(first), Box::new(second))
-                } else {
-                    Self::One(Box::new(first))
-                }
-            } else {
-                Self::Zero
-            }
-        }
-    }
-
-    /// Applies a transformation function to all `ExprLoc` elements in the args.
-    ///
-    /// This is used during the preparation phase to recursively prepare all
-    /// argument expressions before execution.
-    pub fn prepare_args(
-        &mut self,
-        mut f: impl FnMut(ExprLoc<'c>) -> ParseResult<'c, ExprLoc<'c>>,
-    ) -> ParseResult<'c, ()> {
-        // Swap self with Empty to take ownership, then rebuild
-        let taken = std::mem::replace(self, Self::Zero);
-        *self = match taken {
-            Self::Zero => Self::Zero,
-            Self::One(arg) => Self::One(Box::new(f(*arg)?)),
-            Self::Two(arg1, arg2) => Self::Two(Box::new(f(*arg1)?), Box::new(f(*arg2)?)),
-            Self::Args(args) => Self::Args(args.into_iter().map(&mut f).collect::<ParseResult<'c, Vec<_>>>()?),
-            Self::Kwargs(kwargs) => Self::Kwargs(
-                kwargs
-                    .into_iter()
-                    .map(|kwarg| {
-                        Ok(Kwarg {
-                            key: kwarg.key,
-                            value: f(kwarg.value)?,
-                        })
-                    })
-                    .collect::<ParseResult<'c, Vec<_>>>()?,
-            ),
-            Self::ArgsKargs { args, kwargs } => {
-                let args = args.into_iter().map(&mut f).collect::<ParseResult<'c, Vec<_>>>()?;
-                let kwargs = kwargs
-                    .into_iter()
-                    .map(|kwarg| {
-                        Ok(Kwarg {
-                            key: kwarg.key,
-                            value: f(kwarg.value)?,
-                        })
-                    })
-                    .collect::<ParseResult<'c, Vec<_>>>()?;
-                Self::ArgsKargs { args, kwargs }
-            }
-        };
-        Ok(())
-    }
 }

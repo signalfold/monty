@@ -1,6 +1,6 @@
 use strum::{AsRefStr, Display, EnumString};
 
-use crate::args::Args;
+use crate::args::ArgObjects;
 use crate::exceptions::{exc_err_fmt, ExcType};
 use crate::heap::{Heap, HeapData};
 use crate::object::Object;
@@ -25,14 +25,14 @@ pub(crate) enum Builtins {
 
 impl Builtins {
     /// Executes the builtin with the provided positional arguments.
-    pub(crate) fn call<'c>(self, heap: &mut Heap, args: Args) -> RunResult<'c, Object> {
+    pub(crate) fn call<'c, 'e>(self, heap: &mut Heap<'e>, args: ArgObjects<'e>) -> RunResult<'c, Object<'e>> {
         match self {
             Self::Print => {
                 match args {
-                    Args::Zero => {}
-                    Args::One(a) => println!("{}", a.py_str(heap)),
-                    Args::Two(a1, a2) => println!("{} {}", a1.py_str(heap), a2.py_str(heap)),
-                    Args::Many(args) => {
+                    ArgObjects::Zero => {}
+                    ArgObjects::One(a) => println!("{}", a.py_str(heap)),
+                    ArgObjects::Two(a1, a2) => println!("{} {}", a1.py_str(heap), a2.py_str(heap)),
+                    ArgObjects::Many(args) => {
                         let mut iter = args.iter();
                         print!("{}", iter.next().unwrap().py_str(heap));
                         for object in iter {

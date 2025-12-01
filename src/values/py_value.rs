@@ -8,7 +8,7 @@
 /// dispatch on `HeapData` without boxing overhead.
 use std::borrow::Cow;
 
-use crate::args::Args;
+use crate::args::ArgObjects;
 use crate::exceptions::ExcType;
 use crate::heap::{Heap, ObjectId};
 use crate::object::{Attr, Object};
@@ -22,25 +22,28 @@ use crate::run::RunResult;
 ///
 /// This trait is used with `enum_dispatch` on `HeapData` to enable efficient
 /// virtual dispatch without boxing overhead.
-pub trait PyValue {
+///
+/// The lifetime `'e` represents the lifetime of borrowed data (e.g., interned strings)
+/// that may be contained within Objects.
+pub trait PyValue<'e> {
     /// Returns the Python type name for this value (e.g., "list", "str").
     ///
     /// Used for error messages and the `type()` builtin.
     /// Takes heap reference for cases where nested Object lookups are needed.
-    fn py_type(&self, heap: &Heap) -> &'static str;
+    fn py_type(&self, heap: &Heap<'e>) -> &'static str;
 
     /// Returns the number of elements in this container.
     ///
     /// For strings, returns the number of bytes (not Unicode codepoints).
     /// Returns `None` if the type doesn't support `len()`.
-    fn py_len(&self, heap: &Heap) -> Option<usize>;
+    fn py_len(&self, heap: &Heap<'e>) -> Option<usize>;
 
     /// Python equality comparison (`==`).
     ///
     /// For containers, this performs element-wise comparison using the heap
     /// to resolve nested references. Takes `&mut Heap` to allow lazy hash
     /// computation for dict key lookups.
-    fn py_eq(&self, other: &Self, heap: &mut Heap) -> bool;
+    fn py_eq(&self, other: &Self, heap: &mut Heap<'e>) -> bool;
 
     /// Pushes any contained `ObjectId`s onto the stack for reference counting.
     ///
@@ -51,30 +54,30 @@ pub trait PyValue {
     /// Returns the truthiness of the value following Python semantics.
     ///
     /// Container types should typically report `false` when empty.
-    fn py_bool(&self, heap: &Heap) -> bool {
+    fn py_bool(&self, heap: &Heap<'e>) -> bool {
         self.py_len(heap) != Some(0)
     }
 
     /// Returns the Python `repr()` string for this value.
-    fn py_repr<'h>(&'h self, _heap: &'h Heap) -> Cow<'h, str>;
+    fn py_repr<'a>(&'a self, _heap: &'a Heap<'e>) -> Cow<'a, str>;
 
     /// Returns the Python `str()` string for this value.
-    fn py_str<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
+    fn py_str<'a>(&'a self, heap: &'a Heap<'e>) -> Cow<'a, str> {
         self.py_repr(heap)
     }
 
     /// Python addition (`__add__`).
-    fn py_add(&self, _other: &Self, _heap: &mut Heap) -> Option<Object> {
+    fn py_add(&self, _other: &Self, _heap: &mut Heap<'e>) -> Option<Object<'e>> {
         None
     }
 
     /// Python subtraction (`__sub__`).
-    fn py_sub(&self, _other: &Self, _heap: &mut Heap) -> Option<Object> {
+    fn py_sub(&self, _other: &Self, _heap: &mut Heap<'e>) -> Option<Object<'e>> {
         None
     }
 
     /// Python modulus (`__mod__`).
-    fn py_mod(&self, _other: &Self) -> Option<Object> {
+    fn py_mod(&self, _other: &Self) -> Option<Object<'e>> {
         None
     }
 
@@ -84,14 +87,23 @@ pub trait PyValue {
     }
 
     /// Python in-place addition (`__iadd__`).
-    fn py_iadd(&mut self, other: Object, _heap: &mut Heap, _self_id: Option<ObjectId>) -> Result<(), Object> {
-        Err(other)
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the operation was successful, `false` otherwise.
+    fn py_iadd(&mut self, _other: Object<'e>, _heap: &mut Heap<'e>, _self_id: Option<ObjectId>) -> bool {
+        false
     }
 
     /// Calls an attribute method on this value (e.g., `list.append()`).
     ///
     /// Returns an error if the attribute doesn't exist or the arguments are invalid.
-    fn py_call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, _args: Args) -> RunResult<'c, Object> {
+    fn py_call_attr(
+        &mut self,
+        heap: &mut Heap<'e>,
+        attr: &Attr,
+        _args: ArgObjects<'e>,
+    ) -> RunResult<'static, Object<'e>> {
         Err(ExcType::attribute_error(self.py_type(heap), attr))
     }
 
@@ -104,7 +116,7 @@ pub trait PyValue {
     /// the returned value.
     ///
     /// Default implementation returns TypeError.
-    fn py_getitem(&self, _key: &Object, heap: &mut Heap) -> RunResult<'static, Object> {
+    fn py_getitem(&self, _key: &Object<'e>, heap: &mut Heap<'e>) -> RunResult<'static, Object<'e>> {
         Err(ExcType::type_error_not_sub(self.py_type(heap)))
     }
 
@@ -114,7 +126,7 @@ pub trait PyValue {
     /// or the type doesn't support subscript assignment.
     ///
     /// Default implementation returns TypeError.
-    fn py_setitem(&mut self, _key: Object, _value: Object, heap: &mut Heap) -> RunResult<'static, ()> {
+    fn py_setitem(&mut self, _key: Object<'e>, _value: Object<'e>, heap: &mut Heap<'e>) -> RunResult<'static, ()> {
         Err(ExcType::TypeError).map_err(|e| {
             crate::exceptions::exc_fmt!(e; "'{}' object does not support item assignment", self.py_type(heap)).into()
         })

@@ -5,11 +5,13 @@ use std::hash::{Hash, Hasher};
 
 use strum::Display;
 
-use crate::args::Args;
+use crate::args::ArgObjects;
 use crate::exceptions::{exc_err_fmt, ExcType, SimpleException};
 use crate::heap::HeapData;
 use crate::heap::{Heap, ObjectId};
 use crate::run::RunResult;
+use crate::values::bytes::bytes_repr;
+use crate::values::str::string_repr;
 use crate::values::PyValue;
 
 /// Primary value type representing Python objects at runtime.
@@ -22,7 +24,7 @@ use crate::values::PyValue;
 /// or `clone_immediate()` for immediate values only. Direct cloning via `.clone()` would
 /// bypass reference counting and cause memory leaks.
 #[derive(Debug, PartialEq)]
-pub enum Object {
+pub enum Object<'e> {
     // Immediate values (stored inline, no heap allocation)
     Undefined,
     Ellipsis,
@@ -31,13 +33,15 @@ pub enum Object {
     Int(i64),
     Float(f64),
     Range(i64),
+    InternString(&'e str),
+    InternBytes(&'e [u8]),
     Exc(SimpleException),
 
     // Heap-allocated values (stored in arena)
     Ref(ObjectId),
 }
 
-impl PartialOrd for Object {
+impl PartialOrd for Object<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match (self, other) {
             (Self::Int(s), Self::Int(o)) => s.partial_cmp(o),
@@ -53,14 +57,14 @@ impl PartialOrd for Object {
     }
 }
 
-impl From<bool> for Object {
+impl From<bool> for Object<'_> {
     fn from(v: bool) -> Self {
         Self::Bool(v)
     }
 }
 
-impl PyValue for Object {
-    fn py_type(&self, heap: &Heap) -> &'static str {
+impl<'e> PyValue<'e> for Object<'e> {
+    fn py_type(&self, heap: &Heap<'e>) -> &'static str {
         match self {
             Self::Undefined => "undefined",
             Self::Ellipsis => "ellipsis",
@@ -69,19 +73,23 @@ impl PyValue for Object {
             Self::Int(_) => "int",
             Self::Float(_) => "float",
             Self::Range(_) => "range",
+            Self::InternString(_) => "str",
+            Self::InternBytes(_) => "bytes",
             Self::Exc(e) => e.type_str(),
             Self::Ref(id) => heap.get(*id).py_type(heap),
         }
     }
 
-    fn py_len(&self, heap: &Heap) -> Option<usize> {
+    fn py_len(&self, heap: &Heap<'e>) -> Option<usize> {
         match self {
+            Self::InternString(s) => Some(s.len()),
+            Self::InternBytes(b) => Some(b.len()),
             Self::Ref(id) => heap.get(*id).py_len(heap),
             _ => None,
         }
     }
 
-    fn py_eq(&self, other: &Self, heap: &mut Heap) -> bool {
+    fn py_eq(&self, other: &Self, heap: &mut Heap<'e>) -> bool {
         match (self, other) {
             (Self::Undefined, _) => false,
             (_, Self::Undefined) => false,
@@ -91,6 +99,41 @@ impl PyValue for Object {
             (Self::Bool(v1), Self::Int(v2)) => i64::from(*v1) == *v2,
             (Self::Int(v1), Self::Bool(v2)) => *v1 == i64::from(*v2),
             (Self::None, Self::None) => true,
+
+            (Self::InternString(s1), Self::InternString(s2)) => s1 == s2,
+            // for strings we need to account for the fact they might be either interned or not
+            (Self::InternString(s1), Self::Ref(id2)) => {
+                if let HeapData::Str(s2) = heap.get(*id2) {
+                    *s1 == s2.as_str()
+                } else {
+                    false
+                }
+            }
+            (Self::Ref(id1), Self::InternString(s2)) => {
+                if let HeapData::Str(s1) = heap.get(*id1) {
+                    s1.as_str() == *s2
+                } else {
+                    false
+                }
+            }
+
+            (Self::InternBytes(b1), Self::InternBytes(b2)) => b1 == b2,
+            // same for bytes
+            (Self::InternBytes(b1), Self::Ref(id2)) => {
+                if let HeapData::Bytes(b2) = heap.get(*id2) {
+                    *b1 == b2.as_slice()
+                } else {
+                    false
+                }
+            }
+            (Self::Ref(id1), Self::InternBytes(b2)) => {
+                if let HeapData::Bytes(b1) = heap.get(*id1) {
+                    b1.as_slice() == *b2
+                } else {
+                    false
+                }
+            }
+
             (Self::Ref(id1), Self::Ref(id2)) => {
                 if *id1 == *id2 {
                     return true;
@@ -108,7 +151,7 @@ impl PyValue for Object {
         }
     }
 
-    fn py_bool(&self, heap: &Heap) -> bool {
+    fn py_bool(&self, heap: &Heap<'e>) -> bool {
         match self {
             Self::Undefined => false,
             Self::Ellipsis => true,
@@ -118,46 +161,114 @@ impl PyValue for Object {
             Self::Float(f) => *f != 0.0,
             Self::Range(v) => *v != 0,
             Self::Exc(_) => true,
+            Self::InternString(s) => !s.is_empty(),
+            Self::InternBytes(b) => !b.is_empty(),
             Self::Ref(id) => heap.get(*id).py_bool(heap),
         }
     }
 
-    fn py_repr<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
+    fn py_repr<'a>(&'a self, heap: &'a Heap<'e>) -> Cow<'a, str> {
         match self {
+            Self::Undefined => "Undefined".into(),
+            Self::Ellipsis => "Ellipsis".into(),
+            Self::None => "None".into(),
+            Self::Bool(true) => "True".into(),
+            Self::Bool(false) => "False".into(),
+            Self::Int(v) => format!("{v}").into(),
+            Self::Float(v) => {
+                let s = v.to_string();
+                if s.contains('.') {
+                    s.into()
+                } else {
+                    format!("{s}.0").into()
+                }
+            }
+            Self::Range(size) => format!("0:{size}").into(),
+            Self::Exc(exc) => format!("{exc}").into(),
+            Self::InternString(s) => string_repr(s).into(),
+            Self::InternBytes(b) => bytes_repr(b).into(),
             Self::Ref(id) => heap.get(*id).py_repr(heap),
-            _ => self.cow_str(),
         }
     }
 
-    fn py_str<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
+    fn py_str<'a>(&'a self, heap: &'a Heap<'e>) -> Cow<'a, str> {
         match self {
+            Self::InternString(s) => (*s).into(),
             Self::Ref(id) => heap.get(*id).py_str(heap),
-            _ => self.cow_str(),
+            _ => self.py_repr(heap),
         }
     }
 
-    fn py_add(&self, other: &Self, heap: &mut Heap) -> Option<Self> {
+    fn py_add(&self, other: &Self, heap: &mut Heap<'e>) -> Option<Object<'e>> {
         match (self, other) {
-            (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 + v2)),
-            (Self::Float(v1), Self::Float(v2)) => Some(Self::Float(v1 + v2)),
+            (Self::Int(v1), Self::Int(v2)) => Some(Object::Int(v1 + v2)),
+            (Self::Float(v1), Self::Float(v2)) => Some(Object::Float(v1 + v2)),
             (Self::Ref(id1), Self::Ref(id2)) => heap.with_two(*id1, *id2, |heap, left, right| left.py_add(right, heap)),
+            (Self::InternString(s1), Self::InternString(s2)) => {
+                let concat = format!("{s1}{s2}");
+                Some(Object::Ref(heap.allocate(HeapData::Str(concat.into()))))
+            }
+            // for strings we need to account for the fact they might be either interned or not
+            (Self::InternString(s1), Self::Ref(id2)) => {
+                if let HeapData::Str(s2) = heap.get(*id2) {
+                    let concat = format!("{}{}", s1, s2.as_str());
+                    Some(Object::Ref(heap.allocate(HeapData::Str(concat.into()))))
+                } else {
+                    None
+                }
+            }
+            (Self::Ref(id1), Self::InternString(s2)) => {
+                if let HeapData::Str(s1) = heap.get(*id1) {
+                    let concat = format!("{}{}", s1.as_str(), s2);
+                    Some(Object::Ref(heap.allocate(HeapData::Str(concat.into()))))
+                } else {
+                    None
+                }
+            }
+            // same for bytes
+            (Self::InternBytes(b1), Self::InternBytes(b2)) => {
+                let mut b = Vec::with_capacity(b1.len() + b2.len());
+                b.extend_from_slice(b1);
+                b.extend_from_slice(b2);
+                Some(Object::Ref(heap.allocate(HeapData::Bytes(b.into()))))
+            }
+            (Self::InternBytes(b1), Self::Ref(id2)) => {
+                if let HeapData::Bytes(b2) = heap.get(*id2) {
+                    let mut b = Vec::with_capacity(b1.len() + b2.len());
+                    b.extend_from_slice(b1);
+                    b.extend_from_slice(b2);
+                    Some(Object::Ref(heap.allocate(HeapData::Bytes(b.into()))))
+                } else {
+                    None
+                }
+            }
+            (Self::Ref(id1), Self::InternBytes(b2)) => {
+                if let HeapData::Bytes(b1) = heap.get(*id1) {
+                    let mut b = Vec::with_capacity(b1.len() + b2.len());
+                    b.extend_from_slice(b1);
+                    b.extend_from_slice(b2);
+                    Some(Object::Ref(heap.allocate(HeapData::Bytes(b.into()))))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
 
-    fn py_sub(&self, other: &Self, _heap: &mut Heap) -> Option<Self> {
+    fn py_sub(&self, other: &Self, _heap: &mut Heap<'e>) -> Option<Object<'e>> {
         match (self, other) {
-            (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 - v2)),
+            (Self::Int(v1), Self::Int(v2)) => Some(Object::Int(v1 - v2)),
             _ => None,
         }
     }
 
-    fn py_mod(&self, other: &Self) -> Option<Self> {
+    fn py_mod(&self, other: &Self) -> Option<Object<'e>> {
         match (self, other) {
-            (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 % v2)),
-            (Self::Float(v1), Self::Float(v2)) => Some(Self::Float(v1 % v2)),
-            (Self::Float(v1), Self::Int(v2)) => Some(Self::Float(v1 % (*v2 as f64))),
-            (Self::Int(v1), Self::Float(v2)) => Some(Self::Float((*v1 as f64) % v2)),
+            (Self::Int(v1), Self::Int(v2)) => Some(Object::Int(v1 % v2)),
+            (Self::Float(v1), Self::Float(v2)) => Some(Object::Float(v1 % v2)),
+            (Self::Float(v1), Self::Int(v2)) => Some(Object::Float(v1 % (*v2 as f64))),
+            (Self::Int(v1), Self::Float(v2)) => Some(Object::Float((*v1 as f64) % v2)),
             _ => None,
         }
     }
@@ -172,25 +283,73 @@ impl PyValue for Object {
         }
     }
 
-    fn py_iadd(&mut self, other: Self, heap: &mut Heap, _self_id: Option<ObjectId>) -> Result<(), Self> {
-        match self {
-            Self::Int(v1) => {
-                if let Object::Int(v2) = other {
-                    *v1 += v2;
-                    Ok(())
+    fn py_iadd(&mut self, other: Object<'e>, heap: &mut Heap<'e>, _self_id: Option<ObjectId>) -> bool {
+        match (&self, &other) {
+            (Self::Int(v1), Self::Int(v2)) => {
+                *self = Object::Int(*v1 + v2);
+                true
+            }
+            (Self::Float(v1), Self::Float(v2)) => {
+                *self = Object::Float(*v1 + *v2);
+                true
+            }
+            (Self::InternString(s1), Self::InternString(s2)) => {
+                let concat = format!("{s1}{s2}");
+                *self = Object::Ref(heap.allocate(HeapData::Str(concat.into())));
+                true
+            }
+            (Self::InternString(s1), Self::Ref(id2)) => {
+                if let HeapData::Str(s2) = heap.get(*id2) {
+                    let concat = format!("{}{}", s1, s2.as_str());
+                    *self = Object::Ref(heap.allocate(HeapData::Str(concat.into())));
+                    true
                 } else {
-                    Err(other)
+                    false
                 }
             }
-            Self::Ref(id) => {
-                let id = *id;
-                heap.with_entry_mut(id, |heap, data| data.py_iadd(other, heap, Some(id)))
+            (Self::Ref(id1), Self::InternString(s2)) => {
+                if let HeapData::Str(s1) = heap.get_mut(*id1) {
+                    s1.as_string_mut().push_str(s2);
+                    true
+                } else {
+                    false
+                }
             }
-            _ => Err(other),
+            // same for bytes
+            (Self::InternBytes(b1), Self::InternBytes(b2)) => {
+                let mut b = Vec::with_capacity(b1.len() + b2.len());
+                b.extend_from_slice(b1);
+                b.extend_from_slice(b2);
+                *self = Object::Ref(heap.allocate(HeapData::Bytes(b.into())));
+                true
+            }
+            (Self::InternBytes(b1), Self::Ref(id2)) => {
+                if let HeapData::Bytes(b2) = heap.get(*id2) {
+                    let mut b = Vec::with_capacity(b1.len() + b2.len());
+                    b.extend_from_slice(b1);
+                    b.extend_from_slice(b2);
+                    *self = Object::Ref(heap.allocate(HeapData::Bytes(b.into())));
+                    true
+                } else {
+                    false
+                }
+            }
+            (Self::Ref(id1), Self::InternBytes(b2)) => {
+                if let HeapData::Bytes(b1) = heap.get_mut(*id1) {
+                    b1.as_vec_mut().extend_from_slice(b2);
+                    true
+                } else {
+                    false
+                }
+            }
+            (Self::Ref(id), Self::Ref(_)) => {
+                heap.with_entry_mut(*id, |heap, data| data.py_iadd(other, heap, Some(*id)))
+            }
+            _ => false,
         }
     }
 
-    fn py_getitem(&self, key: &Self, heap: &mut Heap) -> RunResult<'static, Self> {
+    fn py_getitem(&self, key: &Object<'e>, heap: &mut Heap<'e>) -> RunResult<'static, Object<'e>> {
         match self {
             Object::Ref(id) => {
                 // Need to take entry out to allow mutable heap access
@@ -202,72 +361,7 @@ impl PyValue for Object {
     }
 }
 
-/// Implementation of AbstractValue for boxed Objects.
-///
-/// This is used for the `HeapData::Object` variant, which wraps immediate values
-/// that have been boxed to give them a stable heap identity (e.g., when `id()` is
-/// called on an int).
-impl PyValue for Box<Object> {
-    fn py_type(&self, heap: &Heap) -> &'static str {
-        self.as_ref().py_type(heap)
-    }
-
-    fn py_len(&self, heap: &Heap) -> Option<usize> {
-        // Boxed Objects don't have len - they're immediate values like Int, Bool
-        self.as_ref().py_len(heap)
-    }
-
-    fn py_eq(&self, other: &Self, heap: &mut Heap) -> bool {
-        self.as_ref().py_eq(other, heap)
-    }
-
-    fn py_dec_ref_ids(&self, stack: &mut Vec<ObjectId>) {
-        self.as_ref().py_dec_ref_ids(stack);
-    }
-
-    fn py_bool(&self, heap: &Heap) -> bool {
-        self.as_ref().py_bool(heap)
-    }
-
-    fn py_repr<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
-        self.as_ref().py_repr(heap)
-    }
-
-    fn py_str<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
-        self.as_ref().py_str(heap)
-    }
-
-    fn py_add(&self, other: &Self, heap: &mut Heap) -> Option<Object> {
-        self.as_ref().py_add(other, heap)
-    }
-
-    fn py_sub(&self, other: &Self, heap: &mut Heap) -> Option<Object> {
-        self.as_ref().py_sub(other, heap)
-    }
-
-    fn py_mod(&self, other: &Self) -> Option<Object> {
-        self.as_ref().py_mod(other)
-    }
-
-    fn py_mod_eq(&self, other: &Self, right_value: i64) -> Option<bool> {
-        self.as_ref().py_mod_eq(other, right_value)
-    }
-
-    fn py_iadd(&mut self, other: Object, heap: &mut Heap, self_id: Option<ObjectId>) -> Result<(), Object> {
-        PyValue::py_iadd(self.as_mut(), other, heap, self_id)
-    }
-
-    fn py_call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, args: Args) -> RunResult<'c, Object> {
-        self.as_mut().py_call_attr(heap, attr, args)
-    }
-}
-
-impl Object {
-    /// Performs Python `__iadd__`, mutating the left operand when possible.
-    pub fn py_iadd(&mut self, other: Self, heap: &mut Heap) -> Result<(), Self> {
-        PyValue::py_iadd(self, other, heap, None)
-    }
-
+impl<'e> Object<'e> {
     /// Returns a stable, unique identifier for this object, boxing it to the heap if necessary.
     ///
     /// Should match Python's `id()` function.
@@ -276,33 +370,43 @@ impl Object {
     /// and replaces `self` with an `Object::Ref` pointing to the boxed value. This ensures that
     /// subsequent calls to `id()` return the same stable heap address.
     ///
-    /// Singletons (None, True, False, etc.) return constant IDs without heap allocation.
-    /// Already heap-allocated objects (Ref) return their existing ObjectId.
-    pub fn id(&mut self, heap: &mut Heap) -> usize {
+    /// Singletons (None, True, False, etc.) return IDs from a dedicated tagged range without allocation.
+    /// Already heap-allocated objects (Ref) reuse their `ObjectId` inside the heap-tagged range.
+    pub fn id(&mut self, heap: &mut Heap<'e>) -> usize {
         match self {
             // should not be used in practice
-            Self::Undefined => 0,
-            // Singletons have constant IDs
-            Self::Ellipsis => 1,
-            Self::None => 2,
-            Self::Bool(b) => usize::from(*b) + 3,
-            // Already heap-allocated, return id plus 5
-            Self::Ref(id) => *id + 5,
-            // Everything else (Int, Float, Range, Exc) needs to be boxed
+            Self::Undefined => singleton_id(SingletonSlot::Undefined),
+            // Singletons have fixed tagged IDs
+            Self::Ellipsis => singleton_id(SingletonSlot::Ellipsis),
+            Self::None => singleton_id(SingletonSlot::None),
+            Self::Bool(b) => {
+                if *b {
+                    singleton_id(SingletonSlot::True)
+                } else {
+                    singleton_id(SingletonSlot::False)
+                }
+            }
+            Self::InternString(s) => {
+                interned_id_from_parts(s.as_ptr() as usize, s.len(), INTERN_STR_ID_TAG, INTERN_STR_ID_MASK)
+            }
+            Self::InternBytes(b) => {
+                interned_id_from_parts(b.as_ptr() as usize, b.len(), INTERN_BYTES_ID_TAG, INTERN_BYTES_ID_MASK)
+            }
+            // Already heap-allocated, return id within a dedicated tag range
+            Self::Ref(id) => heap_tagged_id(*id),
+            // Everything else needs to be added to the heap to get a stable address
             _ => {
                 // Use clone_immediate since these are all non-Ref variants
-                let boxed = Box::new(self.clone_immediate());
-                let new_id = heap.allocate(HeapData::Object(boxed));
+                let new_id = heap.allocate(HeapData::Object(self.clone_immediate()));
                 // Replace self with a Ref to the newly allocated heap object
                 *self = Self::Ref(new_id);
-                // again return id plus 5
-                new_id
+                heap_tagged_id(new_id)
             }
         }
     }
 
     /// Equivalent of Python's `is` method.
-    pub fn is(&mut self, heap: &mut Heap, other: &mut Self) -> bool {
+    pub fn is(&mut self, heap: &mut Heap<'e>, other: &mut Self) -> bool {
         self.id(heap) == other.id(heap)
     }
 
@@ -313,7 +417,7 @@ impl Object {
     ///
     /// For heap-allocated objects (Ref variant), this computes the hash lazily
     /// on first use and caches it for subsequent calls.
-    pub fn py_hash_u64(&self, heap: &mut Heap) -> Option<u64> {
+    pub fn py_hash_u64(&self, heap: &mut Heap<'e>) -> Option<u64> {
         match self {
             // Immediate values can be hashed directly
             Self::Undefined => Some(0),
@@ -345,6 +449,16 @@ impl Object {
                 // based on the exception type and argument for proper distribution
                 Some(e.py_hash())
             }
+            Self::InternString(s) => {
+                let mut hasher = DefaultHasher::new();
+                s.hash(&mut hasher);
+                Some(hasher.finish())
+            }
+            Self::InternBytes(b) => {
+                let mut hasher = DefaultHasher::new();
+                b.hash(&mut hasher);
+                Some(hasher.finish())
+            }
             // For heap-allocated objects, compute hash lazily and cache it
             Self::Ref(id) => heap.get_or_compute_hash(*id),
         }
@@ -363,7 +477,12 @@ impl Object {
     ///
     /// This method requires heap access to work with heap-allocated objects and
     /// to generate accurate error messages.
-    pub fn call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, args: Args) -> RunResult<'c, Object> {
+    pub fn call_attr(
+        &mut self,
+        heap: &mut Heap<'e>,
+        attr: &Attr,
+        args: ArgObjects<'e>,
+    ) -> RunResult<'static, Object<'e>> {
         if let Self::Ref(id) = self {
             heap.call_attr(*id, attr, args)
         } else {
@@ -382,7 +501,7 @@ impl Object {
     /// proper reference counting. Using `.clone()` directly will bypass reference counting
     /// and cause memory leaks or double-frees.
     #[must_use]
-    pub fn clone_with_heap(&self, heap: &mut Heap) -> Self {
+    pub fn clone_with_heap(&self, heap: &mut Heap<'e>) -> Self {
         match self {
             Self::Ref(id) => {
                 heap.inc_ref(*id);
@@ -402,7 +521,7 @@ impl Object {
     /// # Important
     /// This method MUST be called before overwriting a namespace slot or discarding
     /// a value to prevent memory leaks.
-    pub fn drop_with_heap(self, heap: &mut Heap) {
+    pub fn drop_with_heap(self, heap: &mut Heap<'e>) {
         if let Self::Ref(id) = self {
             heap.dec_ref(id);
         }
@@ -422,7 +541,9 @@ impl Object {
             Self::Float(v) => Self::Float(*v),
             Self::Range(v) => Self::Range(*v),
             Self::Exc(e) => Self::Exc(e.clone()),
-            Self::Ref(_) => unreachable!("Ref clones must go through clone_with_heap to maintain refcounts"),
+            Self::InternString(s) => Self::InternString(s),
+            Self::InternBytes(b) => Self::InternBytes(b),
+            Self::Ref(_) => panic!("Ref clones must go through clone_with_heap to maintain refcounts"),
         }
     }
 
@@ -444,29 +565,9 @@ impl Object {
             Self::Float(v) => Self::Float(*v),
             Self::Range(v) => Self::Range(*v),
             Self::Exc(e) => Self::Exc(e.clone()),
+            Self::InternString(s) => Self::InternString(s),
+            Self::InternBytes(b) => Self::InternBytes(b),
             Self::Ref(id) => Self::Ref(*id), // Caller must increment refcount!
-        }
-    }
-
-    fn cow_str(&self) -> Cow<'static, str> {
-        match self {
-            Self::Undefined => "Undefined".into(),
-            Self::Ellipsis => "Ellipsis".into(),
-            Self::None => "None".into(),
-            Self::Bool(true) => "True".into(),
-            Self::Bool(false) => "False".into(),
-            Self::Int(v) => format!("{v}").into(),
-            Self::Float(v) => {
-                let s = v.to_string();
-                if s.contains('.') {
-                    s.into()
-                } else {
-                    format!("{s}.0").into()
-                }
-            }
-            Self::Range(size) => format!("0:{size}").into(),
-            Self::Exc(exc) => format!("{exc}").into(),
-            Self::Ref(id) => format!("<Ref({id})>").into(),
         }
     }
 }
@@ -503,4 +604,59 @@ impl From<String> for Attr {
             _ => Self::Other(name),
         }
     }
+}
+
+/// High-bit tag reserved for literal singletons (None, Ellipsis, booleans).
+const SINGLETON_ID_TAG: usize = 1usize << (usize::BITS - 1);
+/// High-bit tag reserved for interned string `id()` values.
+const INTERN_STR_ID_TAG: usize = 1usize << (usize::BITS - 2);
+/// High-bit tag reserved for interned bytes `id()` values to avoid colliding with any other space.
+const INTERN_BYTES_ID_TAG: usize = 1usize << (usize::BITS - 3);
+/// High-bit tag reserved for heap-backed `ObjectId`s.
+const HEAP_OBJECT_ID_TAG: usize = 1usize << (usize::BITS - 4);
+
+/// Mask that keeps pointer-derived bits below the bytes tag bit.
+const INTERN_BYTES_ID_MASK: usize = INTERN_BYTES_ID_TAG - 1;
+/// Mask that keeps pointer-derived bits below the string tag bit.
+const INTERN_STR_ID_MASK: usize = INTERN_STR_ID_TAG - 1;
+/// Mask that keeps per-singleton offsets below the singleton tag bit.
+const SINGLETON_ID_MASK: usize = SINGLETON_ID_TAG - 1;
+/// Mask that keeps heap object IDs below the heap tag bit.
+const HEAP_OBJECT_ID_MASK: usize = HEAP_OBJECT_ID_TAG - 1;
+
+/// Rotate distance used when folding slice length into the pointer identity.
+const INTERN_LEN_ROTATE: u32 = usize::BITS / 2;
+
+/// Mixes a slice pointer and its length into a deterministic identity
+/// that lives in a reserved numeric range controlled by `tag`.
+///
+/// This lets us use literal storage addresses for stable `id()` values without
+/// ever overlapping the sequential heap `ObjectId` space.
+#[inline]
+fn interned_id_from_parts(ptr: usize, len: usize, tag: usize, mask: usize) -> usize {
+    let mixed = (ptr ^ len.rotate_left(INTERN_LEN_ROTATE)) & mask;
+    tag | mixed
+}
+
+/// Enumerates singleton literal slots so we can issue stable `id()` values without heap allocation.
+#[repr(usize)]
+#[derive(Copy, Clone)]
+enum SingletonSlot {
+    Undefined = 0,
+    Ellipsis = 1,
+    None = 2,
+    False = 3,
+    True = 4,
+}
+
+/// Returns the fully tagged `id()` value for the requested singleton literal.
+#[inline]
+const fn singleton_id(slot: SingletonSlot) -> usize {
+    SINGLETON_ID_TAG | ((slot as usize) & SINGLETON_ID_MASK)
+}
+
+/// Converts a heap `ObjectId` into its tagged `id()` value, ensuring it never collides with other spaces.
+#[inline]
+fn heap_tagged_id(object_id: ObjectId) -> usize {
+    HEAP_OBJECT_ID_TAG | (object_id & HEAP_OBJECT_ID_MASK)
 }

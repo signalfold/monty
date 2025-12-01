@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::args::Args;
+use crate::args::ArgObjects;
 use crate::exceptions::ExcType;
 use crate::heap::{Heap, HeapData, ObjectId};
 use crate::object::{Attr, Object};
@@ -18,21 +18,21 @@ use crate::values::PyValue;
 /// reference counts are incremented if they are heap-allocated (Ref variants).
 /// This ensures objects remain valid while referenced by the list.
 #[derive(Debug, PartialEq, Default)]
-pub struct List(Vec<Object>);
+pub struct List<'e>(Vec<Object<'e>>);
 
-impl List {
+impl<'e> List<'e> {
     /// Creates a new list from a vector of objects.
     ///
     /// Note: This does NOT increment reference counts - the caller must
     /// ensure refcounts are properly managed.
     #[must_use]
-    pub fn new(vec: Vec<Object>) -> Self {
+    pub fn new(vec: Vec<Object<'e>>) -> Self {
         Self(vec)
     }
 
     /// Returns a reference to the underlying vector.
     #[must_use]
-    pub fn as_vec(&self) -> &Vec<Object> {
+    pub fn as_vec(&self) -> &Vec<Object<'e>> {
         &self.0
     }
 
@@ -41,7 +41,7 @@ impl List {
     /// # Safety Considerations
     /// Be careful when mutating the vector directly - you must manually
     /// manage reference counts for any heap objects you add or remove.
-    pub fn as_vec_mut(&mut self) -> &mut Vec<Object> {
+    pub fn as_vec_mut(&mut self) -> &mut Vec<Object<'e>> {
         &mut self.0
     }
 
@@ -63,8 +63,8 @@ impl List {
     /// incremented. This should be used instead of `.clone()` which would
     /// bypass reference counting.
     #[must_use]
-    pub fn clone_with_heap(&self, heap: &mut Heap) -> Self {
-        let cloned: Vec<Object> = self.0.iter().map(|obj| obj.clone_with_heap(heap)).collect();
+    pub fn clone_with_heap(&self, heap: &mut Heap<'e>) -> Self {
+        let cloned: Vec<Object<'e>> = self.0.iter().map(|obj| obj.clone_with_heap(heap)).collect();
         Self(cloned)
     }
 
@@ -75,7 +75,7 @@ impl List {
     /// was already incremented (e.g., via `clone_with_heap` or `evaluate_use`).
     ///
     /// Returns `Object::None`, matching Python's behavior where `list.append()` returns None.
-    pub fn append(&mut self, _heap: &mut Heap, item: Object) {
+    pub fn append(&mut self, _heap: &mut Heap<'e>, item: Object<'e>) {
         // Ownership transfer - refcount was already handled by caller
         self.0.push(item);
     }
@@ -91,7 +91,7 @@ impl List {
     ///   the item is appended to the end (matching Python semantics).
     ///
     /// Returns `Object::None`, matching Python's behavior where `list.insert()` returns None.
-    pub fn insert(&mut self, _heap: &mut Heap, index: usize, item: Object) {
+    pub fn insert(&mut self, _heap: &mut Heap<'e>, index: usize, item: Object<'e>) {
         // Ownership transfer - refcount was already handled by caller
         // Python's insert() appends if index is out of bounds
         if index >= self.0.len() {
@@ -102,22 +102,22 @@ impl List {
     }
 }
 
-impl From<List> for Vec<Object> {
-    fn from(list: List) -> Self {
+impl<'e> From<List<'e>> for Vec<Object<'e>> {
+    fn from(list: List<'e>) -> Self {
         list.0
     }
 }
 
-impl PyValue for List {
-    fn py_type(&self, _heap: &Heap) -> &'static str {
+impl<'e> PyValue<'e> for List<'e> {
+    fn py_type(&self, _heap: &Heap<'e>) -> &'static str {
         "list"
     }
 
-    fn py_len(&self, _heap: &Heap) -> Option<usize> {
+    fn py_len(&self, _heap: &Heap<'e>) -> Option<usize> {
         Some(self.0.len())
     }
 
-    fn py_getitem(&self, key: &Object, heap: &mut Heap) -> RunResult<'static, Object> {
+    fn py_getitem(&self, key: &Object<'e>, heap: &mut Heap<'e>) -> RunResult<'static, Object<'e>> {
         // Extract integer index from key, returning TypeError if not an int
         let index = match key {
             Object::Int(i) => *i,
@@ -137,7 +137,7 @@ impl PyValue for List {
         Ok(self.0[normalized_index as usize].clone_with_heap(heap))
     }
 
-    fn py_eq(&self, other: &Self, heap: &mut Heap) -> bool {
+    fn py_eq(&self, other: &Self, heap: &mut Heap<'e>) -> bool {
         if self.0.len() != other.0.len() {
             return false;
         }
@@ -157,55 +157,50 @@ impl PyValue for List {
         }
     }
 
-    fn py_bool(&self, _heap: &Heap) -> bool {
+    fn py_bool(&self, _heap: &Heap<'e>) -> bool {
         !self.0.is_empty()
     }
 
-    fn py_repr<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
+    fn py_repr<'a>(&'a self, heap: &'a Heap<'e>) -> Cow<'a, str> {
         Cow::Owned(repr_sequence('[', ']', &self.0, heap))
     }
 
-    fn py_add(&self, other: &Self, heap: &mut Heap) -> Option<Object> {
+    fn py_add(&self, other: &Self, heap: &mut Heap<'e>) -> Option<Object<'static>> {
         // Clone both lists' contents with proper refcounting
-        let mut result: Vec<Object> = self.0.iter().map(|obj| obj.clone_with_heap(heap)).collect();
-        let other_cloned: Vec<Object> = other.0.iter().map(|obj| obj.clone_with_heap(heap)).collect();
+        let mut result: Vec<Object<'e>> = self.0.iter().map(|obj| obj.clone_with_heap(heap)).collect();
+        let other_cloned: Vec<Object<'e>> = other.0.iter().map(|obj| obj.clone_with_heap(heap)).collect();
         result.extend(other_cloned);
         let id = heap.allocate(HeapData::List(List::new(result)));
         Some(Object::Ref(id))
     }
 
-    fn py_iadd(&mut self, other: Object, heap: &mut Heap, self_id: Option<ObjectId>) -> Result<(), Object> {
+    fn py_iadd(&mut self, other: Object<'e>, heap: &mut Heap<'e>, self_id: Option<ObjectId>) -> bool {
         // Extract the object ID first, keeping `other` around to drop later
-        let other_id = match &other {
-            Object::Ref(id) => *id,
-            _ => return Err(other),
-        };
+        let Object::Ref(other_id) = &other else { return false };
 
-        let rhs: Vec<Object> = if Some(other_id) == self_id {
+        if Some(*other_id) == self_id {
             // Self-extend: clone our own items with proper refcounting
-            self.0.iter().map(|obj| obj.clone_with_heap(heap)).collect()
+            let items = self.0.iter().map(|obj| obj.clone_with_heap(heap)).collect::<Vec<_>>();
+            self.0.extend(items);
         } else {
-            // Get items from other list - use copy_for_extend to avoid borrow conflict
-            let items = match heap.get(other_id) {
-                HeapData::List(list) => list.as_vec().iter().map(Object::copy_for_extend).collect::<Vec<_>>(),
-                _ => return Err(other),
-            };
-            // Now increment refcounts for Ref variants (borrow released)
-            for obj in &items {
-                if let Object::Ref(id) = obj {
-                    heap.inc_ref(*id);
-                }
+            // Get items from other list using iadd_extend_from_heap helper
+            // This handles the borrow checker limitations with lifetime propagation
+            if !heap.iadd_extend_list(*other_id, &mut self.0) {
+                return false;
             }
-            items
-        };
+        }
 
-        self.0.extend(rhs);
         // Drop the other object - we've extracted its contents and are done with the temporary reference
         other.drop_with_heap(heap);
-        Ok(())
+        true
     }
 
-    fn py_call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, args: Args) -> RunResult<'c, Object> {
+    fn py_call_attr(
+        &mut self,
+        heap: &mut Heap<'e>,
+        attr: &Attr,
+        args: ArgObjects<'e>,
+    ) -> RunResult<'static, Object<'e>> {
         match attr {
             Attr::Append => {
                 let item = args.get_one_arg("list.append")?;
@@ -236,7 +231,7 @@ impl PyValue for List {
 ///
 /// # Returns
 /// A string representation like "[1, 2, 3]" or "(1, 2, 3)"
-pub(crate) fn repr_sequence(start: char, end: char, items: &[Object], heap: &Heap) -> String {
+pub(crate) fn repr_sequence<'e>(start: char, end: char, items: &[Object<'e>], heap: &Heap<'e>) -> String {
     let mut s = String::from(start);
     let mut iter = items.iter();
     if let Some(first) = iter.next() {

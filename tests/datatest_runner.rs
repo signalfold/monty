@@ -161,8 +161,38 @@ fn parse_ref_counts(s: &str) -> HashMap<String, usize> {
 fn run_test(path: &Path, code: &str, expectation: Expectation) {
     let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
 
+    // Handle ref-counting tests separately since they need run_ref_counts()
+    #[cfg(feature = "ref-counting")]
+    if let Expectation::RefCounts(expected) = &expectation {
+        match Executor::new(code, "test.py", &[]) {
+            Ok(ex) => {
+                let result = ex.run_ref_counts(vec![]);
+                match result {
+                    Ok((Exit::Return(_), (actual, unique_refs, heap_count))) => {
+                        // Strict matching: verify all heap objects are accounted for by variables
+                        assert_eq!(
+                            unique_refs, heap_count,
+                            "[{test_name}] Strict matching failed: {heap_count} heap objects exist, \
+                             but only {unique_refs} are referenced by variables.\n\
+                             Actual ref counts: {actual:?}"
+                        );
+                        assert_eq!(&actual, expected, "[{test_name}] ref-counts mismatch");
+                    }
+                    Ok((Exit::Raise(exc), _)) => {
+                        panic!("[{test_name}] Unexpected exception: {exc:?}");
+                    }
+                    Err(e) => panic!("[{test_name}] Runtime error: {e:?}"),
+                }
+            }
+            Err(parse_err) => {
+                panic!("[{test_name}] Unexpected parse error: {parse_err:?}");
+            }
+        }
+        return;
+    }
+
     match Executor::new(code, "test.py", &[]) {
-        Ok(mut ex) => {
+        Ok(ex) => {
             let result = ex.run(vec![]);
             match result {
                 Ok(Exit::Return(obj)) => match expectation {
@@ -177,26 +207,6 @@ fn run_test(path: &Path, code: &str, expectation: Expectation) {
                     Expectation::ReturnType(expected) => {
                         let output = obj.py_type();
                         assert_eq!(output, expected, "[{test_name}] py_type() mismatch");
-                    }
-                    #[cfg(feature = "ref-counting")]
-                    Expectation::RefCounts(expected) => {
-                        // Drop obj to release any borrows on the executor
-                        drop(obj);
-                        let (actual, unique_refs, heap_count) =
-                            ex.get_ref_counts().expect("ref counts should be available after run");
-
-                        // Strict matching: verify all heap objects are accounted for by variables
-                        // unique_refs = number of unique heap IDs referenced by variables
-                        // heap_count = total number of heap objects
-                        // If they differ, there are heap objects not reachable from any variable
-                        assert_eq!(
-                            unique_refs, heap_count,
-                            "[{test_name}] Strict matching failed: {heap_count} heap objects exist, \
-                             but only {unique_refs} are referenced by variables.\n\
-                             Actual ref counts: {actual:?}"
-                        );
-
-                        assert_eq!(actual, expected, "[{test_name}] ref-counts mismatch");
                     }
                     #[cfg(not(feature = "ref-counting"))]
                     Expectation::RefCounts(_) => {

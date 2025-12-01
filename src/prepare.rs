@@ -2,10 +2,11 @@ use std::collections::hash_map::Entry;
 
 use ahash::AHashMap;
 
+use crate::args::ArgExprs;
 use crate::exceptions::{ExcType, ExceptionRaise, SimpleException};
-use crate::expressions::{ArgsExpr, Const, Expr, ExprLoc, Identifier, Node};
+use crate::expressions::{Const, Expr, ExprLoc, Identifier, Node};
 use crate::operators::{CmpOperator, Operator};
-use crate::parse_error::{ParseError, ParseResult};
+use crate::parse_error::ParseError;
 
 /// Result of the prepare phase, containing everything needed to execute code.
 ///
@@ -14,9 +15,8 @@ use crate::parse_error::{ParseError, ParseResult};
 /// - A mapping from variable names to their namespace indices (for ref-count testing)
 /// - The transformed AST nodes ready for execution
 pub(crate) struct PrepareResult<'c> {
-    /// Initial namespace as compile-time constants. Each variable gets a slot,
-    /// initialized to `Const::Undefined` until assigned at runtime.
-    pub namespace: Vec<Const>,
+    /// Number of items in the namespace
+    pub namespace_size: usize,
     /// Maps variable names to their indices in the namespace.
     /// Used for ref-count testing to look up variables by name.
     /// Only available when the `ref-counting` feature is enabled.
@@ -29,11 +29,11 @@ pub(crate) struct PrepareResult<'c> {
 /// Prepares parsed nodes for execution by resolving names and building the initial namespace.
 ///
 /// The namespace will be converted to runtime Objects when execution begins and the heap is available.
-pub(crate) fn prepare<'c>(nodes: Vec<Node<'c>>, input_names: &[&str]) -> ParseResult<'c, PrepareResult<'c>> {
+pub(crate) fn prepare<'c>(nodes: Vec<Node<'c>>, input_names: &[&str]) -> Result<PrepareResult<'c>, ParseError<'c>> {
     let mut p = Prepare::new(nodes.len(), input_names, true);
     let prepared_nodes = p.prepare_nodes(nodes)?;
     Ok(PrepareResult {
-        namespace: p.namespace,
+        namespace_size: p.namespace_size,
         #[cfg(feature = "ref-counting")]
         name_map: p.name_map,
         nodes: prepared_nodes,
@@ -49,9 +49,8 @@ pub(crate) fn prepare<'c>(nodes: Vec<Node<'c>>, input_names: &[&str]) -> ParseRe
 struct Prepare {
     /// Maps variable names to their indices in the namespace vector
     name_map: AHashMap<String, usize>,
-    /// The namespace vector storing Literal values, one per unique variable name.
-    /// Undefined literals are used as placeholders for variables not yet assigned.
-    namespace: Vec<Const>,
+    /// Number of items in the namespace
+    pub namespace_size: usize,
     /// Root frame is the outer frame of the script, e.g. the "global" scope.
     /// When true, the last expression in a block is implicitly returned.
     root_frame: bool,
@@ -73,10 +72,10 @@ impl Prepare {
         for (index, name) in input_names.iter().enumerate() {
             name_map.insert((*name).to_string(), index);
         }
-        let namespace = vec![Const::Undefined; name_map.len()];
+        let namespace_size = name_map.len();
         Self {
             name_map,
-            namespace,
+            namespace_size,
             root_frame,
         }
     }
@@ -91,7 +90,7 @@ impl Prepare {
     ///
     /// # Returns
     /// A vector of prepared nodes ready for execution
-    fn prepare_nodes<'c>(&mut self, nodes: Vec<Node<'c>>) -> ParseResult<'c, Vec<Node<'c>>> {
+    fn prepare_nodes<'c>(&mut self, nodes: Vec<Node<'c>>) -> Result<Vec<Node<'c>>, ParseError<'c>> {
         let nodes_len = nodes.len();
         let mut new_nodes = Vec::with_capacity(nodes_len);
         for (index, node) in nodes.into_iter().enumerate() {
@@ -127,7 +126,7 @@ impl Prepare {
                                     })?;
                                     let expr = Expr::Call {
                                         callable,
-                                        args: ArgsExpr::Zero,
+                                        args: ArgExprs::Zero,
                                     };
                                     Some(ExprLoc::new(id.position, expr))
                                 }
@@ -190,7 +189,7 @@ impl Prepare {
     ///
     /// # Errors
     /// Returns a NameError if an attribute call references an undefined variable
-    fn prepare_expression<'c>(&mut self, loc_expr: ExprLoc<'c>) -> ParseResult<'c, ExprLoc<'c>> {
+    fn prepare_expression<'c>(&mut self, loc_expr: ExprLoc<'c>) -> Result<ExprLoc<'c>, ParseError<'c>> {
         let ExprLoc { position, expr } = loc_expr;
         let expr = match expr {
             Expr::Constant(object) => Expr::Constant(object),
@@ -226,14 +225,14 @@ impl Prepare {
                 let expressions = elements
                     .into_iter()
                     .map(|e| self.prepare_expression(e))
-                    .collect::<ParseResult<_>>()?;
+                    .collect::<Result<_, ParseError<'c>>>()?;
                 Expr::List(expressions)
             }
             Expr::Tuple(elements) => {
                 let expressions = elements
                     .into_iter()
                     .map(|e| self.prepare_expression(e))
-                    .collect::<ParseResult<_>>()?;
+                    .collect::<Result<_, ParseError<'c>>>()?;
                 Expr::Tuple(expressions)
             }
             Expr::Subscript { object, index } => Expr::Subscript {
@@ -244,7 +243,7 @@ impl Prepare {
                 let prepared_pairs = pairs
                     .into_iter()
                     .map(|(k, v)| Ok((self.prepare_expression(k)?, self.prepare_expression(v)?)))
-                    .collect::<ParseResult<_>>()?;
+                    .collect::<Result<_, ParseError<'c>>>()?;
                 Expr::Dict(prepared_pairs)
             }
         };
@@ -299,8 +298,8 @@ impl Prepare {
             }
             Entry::Vacant(e) => {
                 // New name: allocate next index and add Undefined placeholder
-                let id = self.namespace.len();
-                self.namespace.push(Const::Undefined);
+                let id = self.namespace_size;
+                self.namespace_size += 1;
                 e.insert(id);
                 (id, true)
             }

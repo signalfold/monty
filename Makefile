@@ -19,6 +19,7 @@ lint-rs:  ## Lint Rust code with fmt and clippy
 	cargo fmt --all -- --check
 	@cargo clippy --version
 	cargo clippy --tests -- -D warnings -A incomplete_features -W clippy::dbg_macro
+	cargo check --tests --features ref-counting
 
 .PHONY: lint-py
 lint-py: ## Lint Python code with ruff

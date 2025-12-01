@@ -2,10 +2,9 @@ use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use crate::args::Args;
+use crate::args::ArgObjects;
 use crate::object::{Attr, Object};
 use crate::run::RunResult;
-// Import AbstractValue trait for enum_dispatch to work
 use crate::values::PyValue;
 use crate::values::{Bytes, Dict, List, Str, Tuple};
 
@@ -21,19 +20,18 @@ pub type ObjectId = usize;
 /// Note: The `Object` variant is special - it wraps boxed immediate values
 /// that need heap identity (e.g., when `id()` is called on an int).
 #[derive(Debug)]
-pub enum HeapData {
-    /// Boxed object used when id() is called on some values
-    /// to provide them with a unique identity.
-    Object(Box<Object>),
+pub enum HeapData<'e> {
+    /// Object in the heap is used when calculating the id of an object to provide it with a unique identity.
+    Object(Object<'e>),
     Str(Str),
     Bytes(Bytes),
-    List(List),
-    Tuple(Tuple),
-    Dict(Dict),
+    List(List<'e>),
+    Tuple(Tuple<'e>),
+    Dict(Dict<'e>),
     // TODO: support arbitrary classes
 }
 
-impl HeapData {
+impl<'e> HeapData<'e> {
     /// Computes hash for immutable heap types that can be used as dict keys.
     ///
     /// Returns Some(hash) for immutable types (Str, Bytes, Tuple of hashables).
@@ -41,7 +39,7 @@ impl HeapData {
     ///
     /// This is called lazily when the object is first used as a dict key,
     /// avoiding unnecessary hash computation for objects that are never used as keys.
-    fn compute_hash_if_immutable(&self, heap: &mut Heap) -> Option<u64> {
+    fn compute_hash_if_immutable(&self, heap: &mut Heap<'e>) -> Option<u64> {
         match self {
             Self::Str(s) => {
                 let mut hasher = DefaultHasher::new();
@@ -74,8 +72,8 @@ impl HeapData {
 ///
 /// This provides efficient dispatch without boxing overhead by matching on
 /// the enum variant and delegating to the inner type's implementation.
-impl PyValue for HeapData {
-    fn py_type(&self, heap: &Heap) -> &'static str {
+impl<'e> PyValue<'e> for HeapData<'e> {
+    fn py_type(&self, heap: &Heap<'e>) -> &'static str {
         match self {
             Self::Object(obj) => obj.py_type(heap),
             Self::Str(s) => s.py_type(heap),
@@ -86,7 +84,7 @@ impl PyValue for HeapData {
         }
     }
 
-    fn py_len(&self, heap: &Heap) -> Option<usize> {
+    fn py_len(&self, heap: &Heap<'e>) -> Option<usize> {
         match self {
             Self::Object(obj) => PyValue::py_len(obj, heap),
             Self::Str(s) => PyValue::py_len(s, heap),
@@ -97,7 +95,7 @@ impl PyValue for HeapData {
         }
     }
 
-    fn py_eq(&self, other: &Self, heap: &mut Heap) -> bool {
+    fn py_eq(&self, other: &Self, heap: &mut Heap<'e>) -> bool {
         match (self, other) {
             (Self::Object(a), Self::Object(b)) => a.py_eq(b, heap),
             (Self::Str(a), Self::Str(b)) => a.py_eq(b, heap),
@@ -120,7 +118,7 @@ impl PyValue for HeapData {
         }
     }
 
-    fn py_bool(&self, heap: &Heap) -> bool {
+    fn py_bool(&self, heap: &Heap<'e>) -> bool {
         match self {
             Self::Object(obj) => obj.py_bool(heap),
             Self::Str(s) => s.py_bool(heap),
@@ -131,7 +129,7 @@ impl PyValue for HeapData {
         }
     }
 
-    fn py_repr<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
+    fn py_repr<'a>(&'a self, heap: &'a Heap<'e>) -> Cow<'a, str> {
         match self {
             Self::Object(obj) => obj.py_repr(heap),
             Self::Str(s) => s.py_repr(heap),
@@ -142,7 +140,7 @@ impl PyValue for HeapData {
         }
     }
 
-    fn py_str<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
+    fn py_str<'a>(&'a self, heap: &'a Heap<'e>) -> Cow<'a, str> {
         match self {
             Self::Object(obj) => obj.py_str(heap),
             Self::Str(s) => s.py_str(heap),
@@ -153,7 +151,7 @@ impl PyValue for HeapData {
         }
     }
 
-    fn py_add(&self, other: &Self, heap: &mut Heap) -> Option<Object> {
+    fn py_add(&self, other: &Self, heap: &mut Heap<'e>) -> Option<Object<'e>> {
         match (self, other) {
             (Self::Object(a), Self::Object(b)) => a.py_add(b, heap),
             (Self::Str(a), Self::Str(b)) => a.py_add(b, heap),
@@ -165,7 +163,7 @@ impl PyValue for HeapData {
         }
     }
 
-    fn py_sub(&self, other: &Self, heap: &mut Heap) -> Option<Object> {
+    fn py_sub(&self, other: &Self, heap: &mut Heap<'e>) -> Option<Object<'e>> {
         match (self, other) {
             (Self::Object(a), Self::Object(b)) => a.py_sub(b, heap),
             (Self::Str(a), Self::Str(b)) => a.py_sub(b, heap),
@@ -177,7 +175,7 @@ impl PyValue for HeapData {
         }
     }
 
-    fn py_mod(&self, other: &Self) -> Option<Object> {
+    fn py_mod(&self, other: &Self) -> Option<Object<'e>> {
         match (self, other) {
             (Self::Object(a), Self::Object(b)) => a.py_mod(b),
             (Self::Str(a), Self::Str(b)) => a.py_mod(b),
@@ -201,7 +199,7 @@ impl PyValue for HeapData {
         }
     }
 
-    fn py_iadd(&mut self, other: Object, heap: &mut Heap, self_id: Option<ObjectId>) -> Result<(), Object> {
+    fn py_iadd(&mut self, other: Object<'e>, heap: &mut Heap<'e>, self_id: Option<ObjectId>) -> bool {
         match self {
             Self::Object(obj) => obj.py_iadd(other, heap, self_id),
             Self::Str(s) => s.py_iadd(other, heap, self_id),
@@ -212,7 +210,12 @@ impl PyValue for HeapData {
         }
     }
 
-    fn py_call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, args: Args) -> RunResult<'c, Object> {
+    fn py_call_attr(
+        &mut self,
+        heap: &mut Heap<'e>,
+        attr: &Attr,
+        args: ArgObjects<'e>,
+    ) -> RunResult<'static, Object<'e>> {
         match self {
             Self::Object(obj) => obj.py_call_attr(heap, attr, args),
             Self::Str(s) => s.py_call_attr(heap, attr, args),
@@ -223,7 +226,7 @@ impl PyValue for HeapData {
         }
     }
 
-    fn py_getitem(&self, key: &Object, heap: &mut Heap) -> RunResult<'static, Object> {
+    fn py_getitem(&self, key: &Object<'e>, heap: &mut Heap<'e>) -> RunResult<'static, Object<'e>> {
         match self {
             Self::Object(obj) => obj.py_getitem(key, heap),
             Self::Str(s) => s.py_getitem(key, heap),
@@ -234,7 +237,7 @@ impl PyValue for HeapData {
         }
     }
 
-    fn py_setitem(&mut self, key: Object, value: Object, heap: &mut Heap) -> RunResult<'static, ()> {
+    fn py_setitem(&mut self, key: Object<'e>, value: Object<'e>, heap: &mut Heap<'e>) -> RunResult<'static, ()> {
         match self {
             Self::Object(obj) => obj.py_setitem(key, value, heap),
             Self::Str(s) => s.py_setitem(key, value, heap),
@@ -258,7 +261,7 @@ enum HashState {
 }
 
 impl HashState {
-    fn for_data(data: &HeapData) -> Self {
+    fn for_data(data: &HeapData<'_>) -> Self {
         match data {
             HeapData::Str(_) | HeapData::Bytes(_) | HeapData::Tuple(_) => Self::Unknown,
             _ => Self::Unhashable,
@@ -278,10 +281,10 @@ impl HashState {
 /// then restore the data. This avoids unsafe code while keeping `refcount` accessible
 /// for `inc_ref`/`dec_ref` during the borrow.
 #[derive(Debug)]
-struct HeapObject {
+struct HeapObject<'e> {
     refcount: usize,
     /// The payload data. Temporarily `None` while borrowed via `with_entry_mut`/`call_attr`.
-    data: Option<HeapData>,
+    data: Option<HeapData<'e>>,
     /// Current hashing status / cached hash value
     hash_state: HashState,
 }
@@ -293,8 +296,8 @@ struct HeapObject {
 /// simple and avoids the need for generation counters while we're still
 /// building out semantics.
 #[derive(Debug, Default)]
-pub struct Heap {
-    objects: Vec<Option<HeapObject>>,
+pub struct Heap<'e> {
+    objects: Vec<Option<HeapObject<'e>>>,
 }
 
 macro_rules! take_data {
@@ -323,13 +326,13 @@ macro_rules! restore_data {
     }};
 }
 
-impl Heap {
+impl<'e> Heap<'e> {
     /// Allocates a new heap object, returning the fresh identifier.
     ///
     /// Hash computation is deferred until the object is used as a dict key
     /// (via `get_or_compute_hash`). This avoids computing hashes for objects
     /// that are never used as dict keys, improving allocation performance.
-    pub fn allocate(&mut self, data: HeapData) -> ObjectId {
+    pub fn allocate(&mut self, data: HeapData<'e>) -> ObjectId {
         let id = self.objects.len();
         let hash_state = HashState::for_data(&data);
         self.objects.push(Some(HeapObject {
@@ -384,7 +387,7 @@ impl Heap {
     /// Panics if the object ID is invalid, the object has already been freed,
     /// or the data is currently borrowed via `with_entry_mut`/`call_attr`.
     #[must_use]
-    pub fn get(&self, id: ObjectId) -> &HeapData {
+    pub fn get(&self, id: ObjectId) -> &HeapData<'_> {
         self.objects
             .get(id)
             .expect("Heap::get: slot missing")
@@ -400,7 +403,7 @@ impl Heap {
     /// # Panics
     /// Panics if the object ID is invalid, the object has already been freed,
     /// or the data is currently borrowed via `with_entry_mut`/`call_attr`.
-    pub fn get_mut(&mut self, id: ObjectId) -> &mut HeapData {
+    pub fn get_mut(&mut self, id: ObjectId) -> &mut HeapData<'e> {
         self.objects
             .get_mut(id)
             .expect("Heap::get_mut: slot missing")
@@ -456,7 +459,7 @@ impl Heap {
     /// of its payload so we can borrow the heap again inside the call. This avoids the
     /// borrow checker conflict that arises when attribute implementations also need
     /// mutable access to the heap (e.g. for refcounting).
-    pub fn call_attr<'c>(&mut self, id: ObjectId, attr: &Attr, args: Args) -> RunResult<'c, Object> {
+    pub fn call_attr(&mut self, id: ObjectId, attr: &Attr, args: ArgObjects<'e>) -> RunResult<'static, Object<'e>> {
         // Take data out in a block so the borrow of self.objects ends
         let mut data = take_data!(self, id, "call_attr");
 
@@ -481,7 +484,7 @@ impl Heap {
     /// The data is automatically restored after the closure completes.
     pub fn with_entry_mut<F, R>(&mut self, id: ObjectId, f: F) -> R
     where
-        F: FnOnce(&mut Heap, &mut HeapData) -> R,
+        F: FnOnce(&mut Heap<'e>, &mut HeapData<'e>) -> R,
     {
         // Take data out in a block so the borrow of self.objects ends
         let mut data = take_data!(self, id, "with_entry_mut");
@@ -499,7 +502,7 @@ impl Heap {
     /// finishes executing.
     pub fn with_two<F, R>(&mut self, left: ObjectId, right: ObjectId, f: F) -> R
     where
-        F: FnOnce(&mut Heap, &HeapData, &HeapData) -> R,
+        F: FnOnce(&mut Heap<'e>, &HeapData<'e>, &HeapData<'e>) -> R,
     {
         if left == right {
             // Same object - take data once and pass it twice
@@ -551,5 +554,45 @@ impl Heap {
     #[must_use]
     pub fn object_count(&self) -> usize {
         self.objects.iter().filter(|o| o.is_some()).count()
+    }
+
+    /// Helper for List in-place add: extends the destination vec with items from a heap list.
+    ///
+    /// This method exists to work around borrow checker limitations when List::py_iadd
+    /// needs to read from one heap object while extending another. By keeping both
+    /// the read and the refcount increments within Heap's impl block, we can use the
+    /// take/restore pattern to avoid the lifetime propagation issues.
+    ///
+    /// Returns `true` if successful, `false` if the source ID is not a List.
+    pub fn iadd_extend_list(&mut self, source_id: ObjectId, dest: &mut Vec<Object<'e>>) -> bool {
+        // Take the source data temporarily
+        let source_data = take_data!(self, source_id, "iadd_extend_list");
+
+        let success = if let HeapData::List(list) = &source_data {
+            // Copy items and track which refs need incrementing
+            let items: Vec<Object<'e>> = list.as_vec().iter().map(Object::copy_for_extend).collect();
+            let ref_ids: Vec<ObjectId> = items
+                .iter()
+                .filter_map(|obj| if let Object::Ref(id) = obj { Some(*id) } else { None })
+                .collect();
+
+            // Restore source data before mutating heap (inc_ref needs it)
+            restore_data!(self, source_id, source_data, "iadd_extend_list");
+
+            // Now increment refcounts
+            for id in ref_ids {
+                self.inc_ref(id);
+            }
+
+            // Extend destination
+            dest.extend(items);
+            true
+        } else {
+            // Not a list, restore and return false
+            restore_data!(self, source_id, source_data, "iadd_extend_list");
+            false
+        };
+
+        success
     }
 }

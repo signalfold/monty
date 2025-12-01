@@ -3,7 +3,7 @@ use std::fmt::Write;
 
 use indexmap::IndexMap;
 
-use crate::args::Args;
+use crate::args::ArgObjects;
 use crate::exceptions::ExcType;
 use crate::heap::{Heap, HeapData, ObjectId};
 use crate::object::{Attr, Object};
@@ -17,7 +17,7 @@ use crate::values::PyValue;
 /// values, items, and pop.
 ///
 /// # Storage Strategy
-/// Uses `IndexMap<u64, Vec<(Object, Object)>>` to preserve insertion order (matching
+/// Uses `IndexMap<u64, Vec<(Object<'e>, Object<'e>)>>` to preserve insertion order (matching
 /// Python 3.7+ behavior). The key is the hash of the dict key. The Vec handles hash
 /// collisions by storing multiple (key, value) pairs with the same hash, allowing
 /// proper equality checking for collisions.
@@ -27,13 +27,13 @@ use crate::values::PyValue;
 /// When using `from_pairs()`, ownership is transferred without incrementing refcounts
 /// (caller must ensure objects' refcounts account for the dict's reference).
 #[derive(Debug, PartialEq, Default)]
-pub struct Dict {
+pub struct Dict<'e> {
     /// Maps hash -> list of (key, value) pairs with that hash
     /// The Vec handles hash collisions. IndexMap preserves insertion order.
-    map: IndexMap<u64, Vec<(Object, Object)>>,
+    map: IndexMap<u64, Vec<(Object<'e>, Object<'e>)>>,
 }
 
-impl Dict {
+impl<'e> Dict<'e> {
     /// Creates a new empty dict.
     #[must_use]
     pub fn new() -> Self {
@@ -45,7 +45,7 @@ impl Dict {
     /// Assumes the caller is transferring ownership of all keys and values in the pairs.
     /// Does NOT increment reference counts since ownership is being transferred.
     /// Returns Err if any key is unhashable (e.g., list, dict).
-    pub fn from_pairs(pairs: Vec<(Object, Object)>, heap: &mut Heap) -> RunResult<'static, Self> {
+    pub fn from_pairs(pairs: Vec<(Object<'e>, Object<'e>)>, heap: &mut Heap<'e>) -> RunResult<'static, Self> {
         let mut dict = Self::new();
         for (key, value) in pairs {
             dict.set_transfer_ownership(key, value, heap)?;
@@ -59,10 +59,10 @@ impl Dict {
     /// The caller must ensure the objects' refcounts already account for this dict's reference.
     fn set_transfer_ownership(
         &mut self,
-        key: Object,
-        value: Object,
-        heap: &mut Heap,
-    ) -> RunResult<'static, Option<Object>> {
+        key: Object<'e>,
+        value: Object<'e>,
+        heap: &mut Heap<'e>,
+    ) -> RunResult<'static, Option<Object<'e>>> {
         let hash = key
             .py_hash_u64(heap)
             .ok_or_else(|| ExcType::type_error_unhashable(key.py_type(heap)))?;
@@ -89,7 +89,7 @@ impl Dict {
     ///
     /// Returns Ok(Some(value)) if key exists, Ok(None) if key doesn't exist.
     /// Returns Err if key is unhashable.
-    pub fn get(&self, key: &Object, heap: &mut Heap) -> RunResult<'static, Option<&Object>> {
+    pub fn get(&self, key: &Object<'e>, heap: &mut Heap<'e>) -> RunResult<'static, Option<&Object<'e>>> {
         let hash = key
             .py_hash_u64(heap)
             .ok_or_else(|| ExcType::type_error_unhashable(key.py_type(heap)))?;
@@ -112,7 +112,12 @@ impl Dict {
     /// If the key already exists, replaces the old value and returns it (caller now
     /// owns the old value and is responsible for its refcount).
     /// Returns Err if key is unhashable.
-    pub fn set(&mut self, key: Object, value: Object, heap: &mut Heap) -> RunResult<'static, Option<Object>> {
+    pub fn set(
+        &mut self,
+        key: Object<'e>,
+        value: Object<'e>,
+        heap: &mut Heap<'e>,
+    ) -> RunResult<'static, Option<Object<'e>>> {
         let hash = key
             .py_hash_u64(heap)
             .ok_or_else(|| ExcType::type_error_unhashable(key.py_type(heap)))?;
@@ -144,7 +149,11 @@ impl Dict {
     ///
     /// Reference counting: does not decrement refcounts for removed key and value;
     /// caller assumes ownership and is responsible for managing their refcounts.
-    pub fn pop(&mut self, key: &Object, heap: &mut Heap) -> RunResult<'static, Option<(Object, Object)>> {
+    pub fn pop(
+        &mut self,
+        key: &Object<'e>,
+        heap: &mut Heap<'e>,
+    ) -> RunResult<'static, Option<(Object<'e>, Object<'e>)>> {
         let hash = key
             .py_hash_u64(heap)
             .ok_or_else(|| ExcType::type_error_unhashable(key.py_type(heap)))?;
@@ -169,7 +178,7 @@ impl Dict {
     /// Each key's reference count is incremented since the returned vector
     /// now holds additional references to these objects.
     #[must_use]
-    pub fn keys(&self, heap: &mut Heap) -> Vec<Object> {
+    pub fn keys(&self, heap: &mut Heap<'e>) -> Vec<Object<'e>> {
         let mut result = Vec::new();
         for bucket in self.map.values() {
             for (k, _v) in bucket {
@@ -184,7 +193,7 @@ impl Dict {
     /// Each value's reference count is incremented since the returned vector
     /// now holds additional references to these objects.
     #[must_use]
-    pub fn values(&self, heap: &mut Heap) -> Vec<Object> {
+    pub fn values(&self, heap: &mut Heap<'e>) -> Vec<Object<'e>> {
         let mut result = Vec::new();
         for bucket in self.map.values() {
             for (_k, v) in bucket {
@@ -199,7 +208,7 @@ impl Dict {
     /// Each key and value's reference count is incremented since the returned vector
     /// now holds additional references to these objects.
     #[must_use]
-    pub fn items(&self, heap: &mut Heap) -> Vec<(Object, Object)> {
+    pub fn items(&self, heap: &mut Heap<'e>) -> Vec<(Object<'e>, Object<'e>)> {
         let mut result = Vec::new();
         for bucket in self.map.values() {
             for (k, v) in bucket {
@@ -227,10 +236,10 @@ impl Dict {
     /// incremented. This should be used instead of `.clone()` which would
     /// bypass reference counting.
     #[must_use]
-    pub fn clone_with_heap(&self, heap: &mut Heap) -> Self {
+    pub fn clone_with_heap(&self, heap: &mut Heap<'e>) -> Self {
         let mut new_map = IndexMap::new();
         for (hash, bucket) in &self.map {
-            let new_bucket: Vec<(Object, Object)> = bucket
+            let new_bucket: Vec<(Object<'e>, Object<'e>)> = bucket
                 .iter()
                 .map(|(k, v)| (k.clone_with_heap(heap), v.clone_with_heap(heap)))
                 .collect();
@@ -240,16 +249,16 @@ impl Dict {
     }
 }
 
-impl PyValue for Dict {
-    fn py_type(&self, _heap: &Heap) -> &'static str {
+impl<'e> PyValue<'e> for Dict<'e> {
+    fn py_type(&self, _heap: &Heap<'e>) -> &'static str {
         "dict"
     }
 
-    fn py_len(&self, _heap: &Heap) -> Option<usize> {
+    fn py_len(&self, _heap: &Heap<'e>) -> Option<usize> {
         Some(self.len())
     }
 
-    fn py_eq(&self, other: &Self, heap: &mut Heap) -> bool {
+    fn py_eq(&self, other: &Self, heap: &mut Heap<'e>) -> bool {
         if self.len() != other.len() {
             return false;
         }
@@ -283,11 +292,11 @@ impl PyValue for Dict {
         }
     }
 
-    fn py_bool(&self, _heap: &Heap) -> bool {
+    fn py_bool(&self, _heap: &Heap<'e>) -> bool {
         !self.is_empty()
     }
 
-    fn py_repr<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
+    fn py_repr<'a>(&'a self, heap: &'a Heap<'e>) -> Cow<'a, str> {
         if self.is_empty() {
             return Cow::Borrowed("{}");
         }
@@ -309,7 +318,7 @@ impl PyValue for Dict {
         Cow::Owned(s)
     }
 
-    fn py_getitem(&self, key: &Object, heap: &mut Heap) -> RunResult<'static, Object> {
+    fn py_getitem(&self, key: &Object<'e>, heap: &mut Heap<'e>) -> RunResult<'static, Object<'e>> {
         // Use copy_for_extend to avoid borrow conflict, then increment refcount
         let result = self.get(key, heap)?.map(Object::copy_for_extend);
         match result {
@@ -323,7 +332,7 @@ impl PyValue for Dict {
         }
     }
 
-    fn py_setitem(&mut self, key: Object, value: Object, heap: &mut Heap) -> RunResult<'static, ()> {
+    fn py_setitem(&mut self, key: Object<'e>, value: Object<'e>, heap: &mut Heap<'e>) -> RunResult<'static, ()> {
         // Drop the old value if one was replaced
         if let Some(old_value) = self.set(key, value, heap)? {
             old_value.drop_with_heap(heap);
@@ -331,7 +340,12 @@ impl PyValue for Dict {
         Ok(())
     }
 
-    fn py_call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, args: Args) -> RunResult<'c, Object> {
+    fn py_call_attr(
+        &mut self,
+        heap: &mut Heap<'e>,
+        attr: &Attr,
+        args: ArgObjects<'e>,
+    ) -> RunResult<'static, Object<'e>> {
         match attr {
             Attr::Get => {
                 let (key, opt_default) = args.get_one_two_args("get")?;

@@ -4,7 +4,7 @@
 /// operations like length and equality comparison.
 use std::borrow::Cow;
 
-use crate::args::Args;
+use crate::args::ArgObjects;
 use crate::exceptions::ExcType;
 use crate::heap::{Heap, HeapData, ObjectId};
 use crate::object::{Attr, Object};
@@ -63,16 +63,16 @@ impl std::ops::Deref for Str {
     }
 }
 
-impl PyValue for Str {
-    fn py_type(&self, _heap: &Heap) -> &'static str {
+impl<'e> PyValue<'e> for Str {
+    fn py_type(&self, _heap: &Heap<'e>) -> &'static str {
         "str"
     }
 
-    fn py_len(&self, _heap: &Heap) -> Option<usize> {
+    fn py_len(&self, _heap: &Heap<'e>) -> Option<usize> {
         Some(self.0.len())
     }
 
-    fn py_eq(&self, other: &Self, _heap: &mut Heap) -> bool {
+    fn py_eq(&self, other: &Self, _heap: &mut Heap<'e>) -> bool {
         self.0 == other.0
     }
 
@@ -81,43 +81,48 @@ impl PyValue for Str {
         // No-op: strings don't hold Object references
     }
 
-    fn py_bool(&self, _heap: &Heap) -> bool {
+    fn py_bool(&self, _heap: &Heap<'e>) -> bool {
         !self.0.is_empty()
     }
 
-    fn py_repr<'h>(&'h self, _heap: &'h Heap) -> Cow<'h, str> {
+    fn py_repr<'a>(&'a self, _heap: &'a Heap<'e>) -> Cow<'a, str> {
         Cow::Owned(string_repr(&self.0))
     }
 
-    fn py_str<'h>(&'h self, _heap: &'h Heap) -> Cow<'h, str> {
-        Cow::Borrowed(self.0.as_str())
+    fn py_str<'a>(&'a self, _heap: &'a Heap<'e>) -> Cow<'a, str> {
+        self.0.as_str().into()
     }
 
-    fn py_add(&self, other: &Self, heap: &mut Heap) -> Option<Object> {
+    fn py_add(&self, other: &Self, heap: &mut Heap<'e>) -> Option<Object<'e>> {
         let result = format!("{}{}", self.0, other.0);
         let id = heap.allocate(HeapData::Str(result.into()));
         Some(Object::Ref(id))
     }
 
-    fn py_iadd(&mut self, other: Object, heap: &mut Heap, self_id: Option<ObjectId>) -> Result<(), Object> {
+    fn py_iadd(&mut self, other: Object<'e>, heap: &mut Heap<'e>, self_id: Option<ObjectId>) -> bool {
         match other {
             Object::Ref(other_id) => {
                 if Some(other_id) == self_id {
                     let rhs = self.0.clone();
                     self.0.push_str(&rhs);
-                    Ok(())
+                    true
                 } else if let HeapData::Str(rhs) = heap.get(other_id) {
                     self.0.push_str(rhs.as_str());
-                    Ok(())
+                    true
                 } else {
-                    Err(Object::Ref(other_id))
+                    false
                 }
             }
-            _ => Err(other),
+            _ => false,
         }
     }
 
-    fn py_call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, _args: Args) -> RunResult<'c, Object> {
+    fn py_call_attr(
+        &mut self,
+        heap: &mut Heap<'e>,
+        attr: &Attr,
+        _args: ArgObjects<'e>,
+    ) -> RunResult<'static, Object<'e>> {
         Err(ExcType::attribute_error(self.py_type(heap), attr))
     }
 }

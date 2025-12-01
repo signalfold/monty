@@ -12,14 +12,17 @@ use crate::values::PyValue;
 pub type RunResult<'c, T> = Result<T, RunError<'c>>;
 
 #[derive(Debug)]
-pub(crate) struct RunFrame<'c> {
-    namespace: Vec<Object>,
+pub(crate) struct RunFrame<'c, 'e> {
+    namespace: Vec<Object<'e>>,
     parent: Option<StackFrame<'c>>,
     name: &'c str,
 }
 
-impl<'c> RunFrame<'c> {
-    pub fn new(namespace: Vec<Object>) -> Self {
+impl<'c, 'e> RunFrame<'c, 'e>
+where
+    'c: 'e,
+{
+    pub fn new(namespace: Vec<Object<'e>>) -> Self {
         Self {
             namespace,
             parent: None,
@@ -31,11 +34,11 @@ impl<'c> RunFrame<'c> {
     ///
     /// Only available when the `ref-counting` feature is enabled.
     #[cfg(feature = "ref-counting")]
-    pub fn into_namespace(self) -> Vec<Object> {
+    pub fn into_namespace(self) -> Vec<Object<'e>> {
         self.namespace
     }
 
-    pub fn execute(&mut self, heap: &mut Heap, nodes: &[Node<'c>]) -> RunResult<'c, FrameExit<'c>> {
+    pub fn execute(&mut self, heap: &mut Heap<'e>, nodes: &'e [Node<'c>]) -> RunResult<'c, FrameExit<'c, 'e>> {
         for node in nodes {
             if let Some(leave) = self.execute_node(heap, node)? {
                 return Ok(leave);
@@ -44,7 +47,7 @@ impl<'c> RunFrame<'c> {
         Ok(FrameExit::Return(Object::None))
     }
 
-    fn execute_node(&mut self, heap: &mut Heap, node: &Node<'c>) -> RunResult<'c, Option<FrameExit<'c>>> {
+    fn execute_node(&mut self, heap: &mut Heap<'e>, node: &'e Node<'c>) -> RunResult<'c, Option<FrameExit<'c, 'e>>> {
         match node {
             Node::Pass => return internal_err!(InternalRunError::Error; "Unexpected `pass` in execution"),
             Node::Expr(expr) => {
@@ -76,7 +79,7 @@ impl<'c> RunFrame<'c> {
         Ok(None)
     }
 
-    fn execute_expr<'d>(&'d mut self, heap: &'d mut Heap, expr: &'d ExprLoc<'c>) -> RunResult<'c, Object> {
+    fn execute_expr(&mut self, heap: &mut Heap<'e>, expr: &'e ExprLoc<'c>) -> RunResult<'c, Object<'e>> {
         // it seems the struct creation is optimized away, and has no cost
         match evaluate_use(&mut self.namespace, heap, expr) {
             Ok(object) => Ok(object),
@@ -87,7 +90,7 @@ impl<'c> RunFrame<'c> {
         }
     }
 
-    fn execute_expr_bool(&mut self, heap: &mut Heap, expr: &ExprLoc<'c>) -> RunResult<'c, bool> {
+    fn execute_expr_bool(&mut self, heap: &mut Heap<'e>, expr: &'e ExprLoc<'c>) -> RunResult<'c, bool> {
         match evaluate_bool(&mut self.namespace, heap, expr) {
             Ok(object) => Ok(object),
             Err(mut e) => {
@@ -97,7 +100,7 @@ impl<'c> RunFrame<'c> {
         }
     }
 
-    fn raise(&mut self, heap: &mut Heap, op_exc_expr: Option<&ExprLoc<'c>>) -> RunResult<'c, ()> {
+    fn raise(&mut self, heap: &mut Heap<'e>, op_exc_expr: Option<&'e ExprLoc<'c>>) -> RunResult<'c, ()> {
         if let Some(exc_expr) = op_exc_expr {
             let object = self.execute_expr(heap, exc_expr)?;
             match object {
@@ -109,7 +112,7 @@ impl<'c> RunFrame<'c> {
         }
     }
 
-    fn assign(&mut self, heap: &mut Heap, target: &Identifier<'c>, expr: &ExprLoc<'c>) -> RunResult<'c, ()> {
+    fn assign(&mut self, heap: &mut Heap<'e>, target: &'e Identifier<'c>, expr: &'e ExprLoc<'c>) -> RunResult<'c, ()> {
         let new_value = self.execute_expr(heap, expr)?;
         let old_value = std::mem::replace(&mut self.namespace[target.id], new_value);
         if let Object::Ref(object_id) = old_value {
@@ -120,24 +123,25 @@ impl<'c> RunFrame<'c> {
 
     fn op_assign(
         &mut self,
-        heap: &mut Heap,
+        heap: &mut Heap<'e>,
         target: &Identifier<'c>,
         op: &Operator,
-        expr: &ExprLoc<'c>,
+        expr: &'e ExprLoc<'c>,
     ) -> RunResult<'c, ()> {
         let right_object = self.execute_expr(heap, expr)?;
         if let Some(target_object) = self.namespace.get_mut(target.id) {
-            let r = match op {
-                Operator::Add => target_object.py_iadd(right_object, heap),
+            let ok = match op {
+                Operator::Add => target_object.py_iadd(right_object, heap, None),
                 _ => return internal_err!(InternalRunError::TodoError; "Assign operator {op:?} not yet implemented"),
             };
-            if let Err(right) = r {
-                let target_type = target_object.py_repr(heap);
-                let right_type = right.py_repr(heap);
+            if ok {
+                Ok(())
+            } else {
+                // TODO this should probably move into exception.rs
+                let target_type = target_object.py_type(heap);
+                let right_type = target_object.py_type(heap);
                 let e = exc_fmt!(ExcType::TypeError; "unsupported operand type(s) for {op}: '{target_type}' and '{right_type}'");
                 Err(e.with_frame(self.stack_frame(&expr.position)).into())
-            } else {
-                Ok(())
             }
         } else {
             let e = SimpleException::new(ExcType::NameError, Some(target.name.clone().into()));
@@ -147,10 +151,10 @@ impl<'c> RunFrame<'c> {
 
     fn subscript_assign(
         &mut self,
-        heap: &mut Heap,
+        heap: &mut Heap<'e>,
         target: &Identifier<'c>,
-        index: &ExprLoc<'c>,
-        value: &ExprLoc<'c>,
+        index: &'e ExprLoc<'c>,
+        value: &'e ExprLoc<'c>,
     ) -> RunResult<'c, ()> {
         let key = self.execute_expr(heap, index)?;
         let val = self.execute_expr(heap, value)?;
@@ -171,11 +175,11 @@ impl<'c> RunFrame<'c> {
 
     fn for_loop(
         &mut self,
-        heap: &mut Heap,
+        heap: &mut Heap<'e>,
         target: &Identifier,
-        iter: &ExprLoc<'c>,
-        body: &[Node<'c>],
-        _or_else: &[Node<'c>],
+        iter: &'e ExprLoc<'c>,
+        body: &'e [Node<'c>],
+        _or_else: &'e [Node<'c>],
     ) -> RunResult<'c, ()> {
         let Object::Range(range_size) = self.execute_expr(heap, iter)? else {
             return internal_err!(InternalRunError::TodoError; "`for` iter must be a range");
@@ -188,12 +192,12 @@ impl<'c> RunFrame<'c> {
         Ok(())
     }
 
-    fn if_<'d>(
+    fn if_(
         &mut self,
-        heap: &mut Heap,
-        test: &'d ExprLoc<'c>,
-        body: &'d [Node<'c>],
-        or_else: &'d [Node<'c>],
+        heap: &mut Heap<'e>,
+        test: &'e ExprLoc<'c>,
+        body: &'e [Node<'c>],
+        or_else: &'e [Node<'c>],
     ) -> RunResult<'c, ()> {
         if self.execute_expr_bool(heap, test)? {
             self.execute(heap, body)?;
@@ -208,7 +212,7 @@ impl<'c> RunFrame<'c> {
     }
 }
 
-fn set_name<'c>(name: &'c str, error: &mut RunError<'c>) {
+fn set_name<'e>(name: &'e str, error: &mut RunError<'e>) {
     if let RunError::Exc(ref mut exc) = error {
         if let Some(ref mut stack_frame) = exc.frame {
             stack_frame.frame_name = Some(name);

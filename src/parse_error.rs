@@ -7,7 +7,7 @@ use crate::exceptions::{ExceptionRaise, InternalRunError, RunError};
 pub enum ParseError<'c> {
     Todo(&'c str),
     Parsing(String),
-    Internal(Cow<'c, str>),
+    Internal(Cow<'static, str>),
     PreEvalExc(ExceptionRaise<'c>),
     PreEvalInternal(InternalRunError),
 }
@@ -57,5 +57,3 @@ impl ParseError<'_> {
         }
     }
 }
-
-pub type ParseResult<'c, T> = Result<T, ParseError<'c>>;

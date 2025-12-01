@@ -1,6 +1,6 @@
-use crate::args::Args;
+use crate::args::{ArgExprs, ArgObjects};
 use crate::exceptions::{internal_err, ExcType, InternalRunError, SimpleException};
-use crate::expressions::{ArgsExpr, Callable, Expr, ExprLoc, Identifier};
+use crate::expressions::{Callable, Expr, ExprLoc, Identifier};
 use crate::heap::Heap;
 use crate::object::{Attr, Object};
 use crate::operators::{CmpOperator, Operator};
@@ -12,13 +12,13 @@ use crate::HeapData;
 ///
 /// `namespace` provides the current frame bindings, while `heap` is threaded so any
 /// future heap-backed objects can be created/cloned without re-threading plumbing later.
-pub(crate) fn evaluate_use<'c, 'd>(
-    namespace: &'d mut [Object],
-    heap: &'d mut Heap,
-    expr_loc: &'d ExprLoc<'c>,
-) -> RunResult<'c, Object> {
+pub(crate) fn evaluate_use<'c, 'e>(
+    namespace: &mut [Object<'e>],
+    heap: &mut Heap<'e>,
+    expr_loc: &'e ExprLoc<'c>,
+) -> RunResult<'c, Object<'e>> {
     match &expr_loc.expr {
-        Expr::Constant(literal) => Ok(literal.to_object(heap)),
+        Expr::Constant(literal) => Ok(literal.to_object()),
         Expr::Name(ident) => {
             if let Some(object) = namespace.get(ident.id) {
                 match object {
@@ -80,10 +80,10 @@ pub(crate) fn evaluate_use<'c, 'd>(
 ///
 /// `namespace` provides the current frame bindings, while `heap` is threaded so any
 /// future heap-backed objects can be created/cloned without re-threading plumbing later.
-pub(crate) fn evaluate_discard<'c, 'd>(
-    namespace: &'d mut [Object],
-    heap: &'d mut Heap,
-    expr_loc: &'d ExprLoc<'c>,
+pub(crate) fn evaluate_discard<'c, 'e>(
+    namespace: &mut [Object<'e>],
+    heap: &mut Heap<'e>,
+    expr_loc: &'e ExprLoc<'c>,
 ) -> RunResult<'c, ()> {
     match &expr_loc.expr {
         Expr::Constant(_) => Ok(()),
@@ -133,10 +133,10 @@ pub(crate) fn evaluate_discard<'c, 'd>(
 }
 
 /// Specialized helper for truthiness checks; shares implementation with `evaluate`.
-pub(crate) fn evaluate_bool<'c, 'd>(
-    namespace: &'d mut [Object],
-    heap: &'d mut Heap,
-    expr_loc: &'d ExprLoc<'c>,
+pub(crate) fn evaluate_bool<'c, 'e>(
+    namespace: &mut [Object<'e>],
+    heap: &mut Heap<'e>,
+    expr_loc: &'e ExprLoc<'c>,
 ) -> RunResult<'c, bool> {
     if let Expr::CmpOp { left, op, right } = &expr_loc.expr {
         cmp_op(namespace, heap, left, op, right)
@@ -150,13 +150,13 @@ pub(crate) fn evaluate_bool<'c, 'd>(
 }
 
 /// Evaluates a binary operator expression (`+, -, %`, etc.).
-fn eval_op<'c, 'd>(
-    namespace: &'d mut [Object],
-    heap: &'d mut Heap,
-    left: &'d ExprLoc<'c>,
-    op: &'d Operator,
-    right: &'d ExprLoc<'c>,
-) -> RunResult<'c, Object> {
+fn eval_op<'c, 'e>(
+    namespace: &mut [Object<'e>],
+    heap: &mut Heap<'e>,
+    left: &'e ExprLoc<'c>,
+    op: &Operator,
+    right: &'e ExprLoc<'c>,
+) -> RunResult<'c, Object<'e>> {
     let left_object = evaluate_use(namespace, heap, left)?;
     let right_object = evaluate_use(namespace, heap, right)?;
     let op_object: Option<Object> = match op {
@@ -182,12 +182,12 @@ fn eval_op<'c, 'd>(
 }
 
 /// Evaluates comparison operators, reusing `evaluate` so heap semantics remain consistent.
-fn cmp_op<'c, 'd>(
-    namespace: &'d mut [Object],
-    heap: &'d mut Heap,
-    left: &'d ExprLoc<'c>,
-    op: &'d CmpOperator,
-    right: &'d ExprLoc<'c>,
+fn cmp_op<'c, 'e>(
+    namespace: &mut [Object<'e>],
+    heap: &mut Heap<'e>,
+    left: &'e ExprLoc<'c>,
+    op: &CmpOperator,
+    right: &'e ExprLoc<'c>,
 ) -> RunResult<'c, bool> {
     let mut left_object = evaluate_use(namespace, heap, left)?;
     let mut right_object = evaluate_use(namespace, heap, right)?;
@@ -230,12 +230,12 @@ fn cmp_op<'c, 'd>(
 /// Evaluates callable function calls, collecting argument values via the shared heap.
 ///
 /// Handles builtin functions, exception constructors, and (eventually) user-defined functions.
-fn call_function<'c, 'd>(
-    namespace: &'d mut [Object],
-    heap: &'d mut Heap,
-    callable: &'d Callable,
-    args: &'d ArgsExpr<'c>,
-) -> RunResult<'c, Object> {
+fn call_function<'c, 'e>(
+    namespace: &mut [Object<'e>],
+    heap: &mut Heap<'e>,
+    callable: &Callable,
+    args: &'e ArgExprs<'c>,
+) -> RunResult<'c, Object<'e>> {
     let args = evaluate_args(namespace, heap, args)?;
     match callable {
         Callable::Builtin(builtin) => builtin.call(heap, args),
@@ -247,14 +247,14 @@ fn call_function<'c, 'd>(
 }
 
 /// Handles attribute method calls like `list.append`, again threading the heap for safety.
-fn attr_call<'c, 'd>(
-    namespace: &'d mut [Object],
-    heap: &'d mut Heap,
-    expr_loc: &'d ExprLoc<'c>,
+fn attr_call<'c, 'e>(
+    namespace: &mut [Object<'e>],
+    heap: &mut Heap<'e>,
+    expr_loc: &ExprLoc<'c>,
     object_ident: &Identifier<'c>,
     attr: &Attr,
-    args: &'d ArgsExpr<'c>,
-) -> RunResult<'c, Object> {
+    args: &'e ArgExprs<'c>,
+) -> RunResult<'c, Object<'e>> {
     // Evaluate arguments first to avoid borrow conflicts
     let args = evaluate_args(namespace, heap, args)?;
 
@@ -273,10 +273,13 @@ fn attr_call<'c, 'd>(
     object.call_attr(heap, attr, args)
 }
 
-fn call_exception<'c>(heap: &mut Heap, args: Args, exc_type: ExcType) -> RunResult<'c, Object> {
+fn call_exception<'c, 'e>(heap: &mut Heap<'e>, args: ArgObjects, exc_type: ExcType) -> RunResult<'c, Object<'e>> {
     match args {
-        Args::Zero => return Ok(Object::Exc(SimpleException::new(exc_type, None))),
-        Args::One(Object::Ref(object_id)) => {
+        ArgObjects::Zero => return Ok(Object::Exc(SimpleException::new(exc_type, None))),
+        ArgObjects::One(Object::InternString(s)) => {
+            return Ok(Object::Exc(SimpleException::new(exc_type, Some(s.to_owned().into()))));
+        }
+        ArgObjects::One(Object::Ref(object_id)) => {
             if let HeapData::Str(s) = heap.get(object_id) {
                 return Ok(Object::Exc(SimpleException::new(
                     exc_type,
@@ -291,24 +294,24 @@ fn call_exception<'c>(heap: &mut Heap, args: Args, exc_type: ExcType) -> RunResu
 
 /// Evaluates function arguments into an Args, optimized for common argument counts.
 #[inline]
-fn evaluate_args<'c, 'd>(
-    namespace: &'d mut [Object],
-    heap: &'d mut Heap,
-    args_expr: &'d ArgsExpr<'c>,
-) -> RunResult<'c, Args> {
+fn evaluate_args<'c, 'e>(
+    namespace: &mut [Object<'e>],
+    heap: &mut Heap<'e>,
+    args_expr: &'e ArgExprs<'c>,
+) -> RunResult<'c, ArgObjects<'e>> {
     match args_expr {
-        ArgsExpr::Zero => Ok(Args::Zero),
-        ArgsExpr::One(arg) => evaluate_use(namespace, heap, arg).map(Args::One),
-        ArgsExpr::Two(arg1, arg2) => {
+        ArgExprs::Zero => Ok(ArgObjects::Zero),
+        ArgExprs::One(arg) => evaluate_use(namespace, heap, arg).map(ArgObjects::One),
+        ArgExprs::Two(arg1, arg2) => {
             let arg0 = evaluate_use(namespace, heap, arg1)?;
             let arg1 = evaluate_use(namespace, heap, arg2)?;
-            Ok(Args::Two(arg0, arg1))
+            Ok(ArgObjects::Two(arg0, arg1))
         }
-        ArgsExpr::Args(args) => args
+        ArgExprs::Args(args) => args
             .iter()
             .map(|a| evaluate_use(namespace, heap, a))
             .collect::<RunResult<_>>()
-            .map(Args::Many),
+            .map(ArgObjects::Many),
         _ => todo!("Implement evaluation for kwargs"),
     }
 }

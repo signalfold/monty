@@ -21,12 +21,11 @@ use ahash::AHashMap;
 
 use crate::exceptions::{InternalRunError, RunError};
 pub use crate::exit::{Exit, Value};
-use crate::expressions::{Const, Node};
+use crate::expressions::Node;
 use crate::heap::{Heap, HeapData};
 use crate::object::Object;
 use crate::parse::parse;
-// TODO should these really be public?
-pub use crate::parse_error::{ParseError, ParseResult};
+pub use crate::parse_error::ParseError;
 use crate::prepare::prepare;
 use crate::run::RunFrame;
 
@@ -36,82 +35,45 @@ use crate::run::RunFrame;
 /// objects). When `run()` is called, literals are converted to heap-allocated runtime
 /// objects, ensuring proper reference counting from the start of execution.
 ///
-/// When the `ref-count-testing` feature is enabled, the `last_namespace` field stores
-/// the final state of all variables, which can be used along with `name_map` to inspect
-/// reference counts for testing.
+/// When the `ref-counting` feature is enabled, `run_ref_counts()` can be used to
+/// execute code and retrieve reference count data for testing purposes.
 #[derive(Debug)]
 pub struct Executor<'c> {
-    initial_namespace: Vec<Const>,
-    /// Maps variable names to their indices in the namespace. Preserved for ref-count testing.
+    namespace_size: usize,
+    /// Maps variable names to their indices in the namespace. Used for ref-count testing.
     #[cfg(feature = "ref-counting")]
     name_map: AHashMap<String, usize>,
     nodes: Vec<Node<'c>>,
-    heap: Heap,
-    /// Stores the namespace after the last run() call for ref-count inspection.
-    #[cfg(feature = "ref-counting")]
-    last_namespace: Option<Vec<Object>>,
 }
 
 impl<'c> Executor<'c> {
-    pub fn new(code: &'c str, filename: &'c str, input_names: &[&str]) -> ParseResult<'c, Self> {
+    pub fn new(code: &'c str, filename: &'c str, input_names: &[&str]) -> Result<Self, ParseError<'c>> {
         let nodes = parse(code, filename)?;
-        // dbg!(&nodes);
         let prepared = prepare(nodes, input_names)?;
-        // dbg!(&prepared.namespace, &prepared.nodes);
         Ok(Self {
-            initial_namespace: prepared.namespace,
+            namespace_size: prepared.namespace_size,
             #[cfg(feature = "ref-counting")]
             name_map: prepared.name_map,
             nodes: prepared.nodes,
-            heap: Heap::default(),
-            #[cfg(feature = "ref-counting")]
-            last_namespace: None,
         })
     }
 
     /// Executes the code with the given input values.
     ///
-    /// The heap is cleared at the start of each run, ensuring no state leaks between
-    /// executions. The initial namespace (stored as Literals) is converted to runtime
-    /// Objects with proper heap allocation and reference counting.
-    ///
-    /// When `ref-count-testing` feature is enabled, the namespace is stored in
-    /// `last_namespace` after execution for ref-count inspection.
+    /// The heap is created fresh for each run, ensuring no state leaks between
+    /// executions.
     ///
     /// # Arguments
     /// * `inputs` - Values to fill the first N slots of the namespace (e.g., function parameters)
-    pub fn run<'h>(&'h mut self, inputs: Vec<Object>) -> Result<Exit<'c, 'h>, InternalRunError> {
-        // Clear heap before starting new execution
-        self.heap.clear();
-        #[cfg(feature = "ref-counting")]
-        {
-            self.last_namespace = None;
-        }
-
-        // Convert initial namespace from Literals to Objects with heap allocation
-        let mut namespace: Vec<Object> = self
-            .initial_namespace
-            .iter()
-            .map(|lit| lit.to_object(&mut self.heap))
-            .collect();
-
-        // Fill in the input values (overwriting the default Undefined slots)
-        for (i, input) in inputs.into_iter().enumerate() {
-            namespace[i] = input;
-        }
-        // dbg!(&self.nodes, &self.heap);
+    pub fn run<'e>(&'e self, inputs: Vec<Object<'e>>) -> Result<Exit<'c, 'e>, InternalRunError> {
+        let namespace = self.prepare_namespace(inputs)?;
+        let mut heap = Heap::default();
 
         let mut frame = RunFrame::new(namespace);
-        let result = frame.execute(&mut self.heap, &self.nodes);
-
-        // Store namespace for ref-count inspection (only with feature enabled)
-        #[cfg(feature = "ref-counting")]
-        {
-            self.last_namespace = Some(frame.into_namespace());
-        }
+        let result = frame.execute(&mut heap, &self.nodes);
 
         match result {
-            Ok(v) => Ok(Exit::new(v, &self.heap)),
+            Ok(v) => Ok(Exit::new(v, heap)),
             Err(e) => match e {
                 RunError::Exc(exc) => Ok(Exit::Raise(exc)),
                 RunError::Internal(internal) => Err(internal),
@@ -119,35 +81,70 @@ impl<'c> Executor<'c> {
         }
     }
 
-    /// Returns reference counts for named variables after the last run.
+    /// Executes the code and returns both the result and reference count data.
     ///
-    /// Returns a tuple of:
-    /// - A map from variable names to their reference counts (only for heap-allocated objects)
-    /// - The number of unique heap object IDs referenced by variables
-    /// - The total number of live heap objects (for strict matching validation)
+    /// This is used for testing reference counting behavior. Returns:
+    /// - The execution result (`Exit`)
+    /// - Reference count data as a tuple of:
+    ///   - A map from variable names to their reference counts (only for heap-allocated objects)
+    ///   - The number of unique heap object IDs referenced by variables
+    ///   - The total number of live heap objects
     ///
-    /// For strict matching, compare unique_refs_count with heap_object_count. If they're equal,
-    /// all heap objects are accounted for by named variables.
-    ///
-    /// Returns None if no execution has occurred yet.
+    /// For strict matching validation, compare unique_refs_count with heap_object_count.
+    /// If they're equal, all heap objects are accounted for by named variables.
     ///
     /// Only available when the `ref-counting` feature is enabled.
     #[cfg(feature = "ref-counting")]
-    #[must_use]
-    pub fn get_ref_counts(&self) -> Option<(HashMap<String, usize>, usize, usize)> {
+    pub fn run_ref_counts<'e>(
+        &'e self,
+        inputs: Vec<Object<'e>>,
+    ) -> Result<(Exit<'c, 'e>, (HashMap<String, usize>, usize, usize)), InternalRunError> {
         use std::collections::HashSet;
 
-        let namespace = self.last_namespace.as_ref()?;
+        let namespace = self.prepare_namespace(inputs)?;
+        let mut heap = Heap::default();
+
+        let mut frame = RunFrame::new(namespace);
+        let result = frame.execute(&mut heap, &self.nodes);
+
+        // Compute ref counts before consuming the heap
+        let final_namespace = frame.into_namespace();
         let mut counts = HashMap::new();
         let mut unique_ids = HashSet::new();
 
         for (name, &index) in &self.name_map {
-            if let Some(Object::Ref(id)) = namespace.get(index) {
-                counts.insert(name.clone(), self.heap.get_refcount(*id));
+            if let Some(Object::Ref(id)) = final_namespace.get(index) {
+                counts.insert(name.clone(), heap.get_refcount(*id));
                 unique_ids.insert(*id);
             }
         }
-        Some((counts, unique_ids.len(), self.heap.object_count()))
+        let ref_count_data = (counts, unique_ids.len(), heap.object_count());
+
+        let exit = match result {
+            Ok(v) => Exit::new(v, heap),
+            Err(e) => match e {
+                RunError::Exc(exc) => Exit::Raise(exc),
+                RunError::Internal(internal) => return Err(internal),
+            },
+        };
+
+        Ok((exit, ref_count_data))
+    }
+
+    /// Prepares the namespace for execution by filling input slots and padding with Undefined.
+    ///
+    /// Returns the prepared namespace or an error if there are too many inputs.
+    fn prepare_namespace<'e>(&self, inputs: Vec<Object<'e>>) -> Result<Vec<Object<'e>>, InternalRunError> {
+        let Some(extra) = self.namespace_size.checked_sub(inputs.len()) else {
+            return Err(InternalRunError::Error(
+                format!("input length should be <={}", self.namespace_size).into(),
+            ));
+        };
+        let mut namespace: Vec<Object<'e>> = inputs;
+        if extra > 0 {
+            namespace.extend((0..extra).map(|_| Object::Undefined));
+        }
+        Ok(namespace)
     }
 }
 

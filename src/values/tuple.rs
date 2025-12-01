@@ -1,11 +1,11 @@
-/// Python tuple type, wrapping a `Vec<Object>`.
+/// Python tuple type, wrapping a `Vec<Object<'e>>`.
 ///
 /// This type provides Python tuple semantics. Tuples are immutable sequences
 /// that can contain any Python object. Like lists, tuples properly handle
 /// reference counting for heap-allocated objects.
 use std::borrow::Cow;
 
-use crate::args::Args;
+use crate::args::ArgObjects;
 use crate::exceptions::ExcType;
 use crate::heap::{Heap, ObjectId};
 use crate::object::{Attr, Object};
@@ -15,7 +15,7 @@ use crate::values::PyValue;
 
 /// Python tuple value stored on the heap.
 ///
-/// Wraps a `Vec<Object>` and provides Python-compatible tuple operations.
+/// Wraps a `Vec<Object<'e>>` and provides Python-compatible tuple operations.
 /// Unlike lists, tuples are conceptually immutable (though this is not
 /// enforced at the type level for internal operations).
 ///
@@ -23,21 +23,21 @@ use crate::values::PyValue;
 /// When a tuple is freed, all contained heap references have their refcounts
 /// decremented via `push_stack_ids`.
 #[derive(Debug, PartialEq, Default)]
-pub struct Tuple(Vec<Object>);
+pub struct Tuple<'e>(Vec<Object<'e>>);
 
-impl Tuple {
+impl<'e> Tuple<'e> {
     /// Creates a new tuple from a vector of objects.
     ///
     /// Note: This does NOT increment reference counts - the caller must
     /// ensure refcounts are properly managed.
     #[must_use]
-    pub fn from_vec(vec: Vec<Object>) -> Self {
+    pub fn from_vec(vec: Vec<Object<'e>>) -> Self {
         Self(vec)
     }
 
     /// Returns a reference to the underlying vector.
     #[must_use]
-    pub fn as_vec(&self) -> &Vec<Object> {
+    pub fn as_vec(&self) -> &Vec<Object<'e>> {
         &self.0
     }
 
@@ -47,40 +47,40 @@ impl Tuple {
     /// incremented. This should be used instead of `.clone()` which would
     /// bypass reference counting.
     #[must_use]
-    pub fn clone_with_heap(&self, heap: &mut Heap) -> Self {
-        let cloned: Vec<Object> = self.0.iter().map(|obj| obj.clone_with_heap(heap)).collect();
+    pub fn clone_with_heap(&self, heap: &mut Heap<'e>) -> Self {
+        let cloned: Vec<Object<'e>> = self.0.iter().map(|obj| obj.clone_with_heap(heap)).collect();
         Self(cloned)
     }
 }
 
-impl From<Vec<Object>> for Tuple {
-    fn from(vec: Vec<Object>) -> Self {
+impl<'e> From<Vec<Object<'e>>> for Tuple<'e> {
+    fn from(vec: Vec<Object<'e>>) -> Self {
         Self(vec)
     }
 }
 
-impl std::iter::FromIterator<Object> for Tuple {
-    fn from_iter<I: IntoIterator<Item = Object>>(iter: I) -> Self {
+impl<'e> std::iter::FromIterator<Object<'e>> for Tuple<'e> {
+    fn from_iter<I: IntoIterator<Item = Object<'e>>>(iter: I) -> Self {
         Self(iter.into_iter().collect())
     }
 }
 
-impl From<Tuple> for Vec<Object> {
-    fn from(tuple: Tuple) -> Self {
+impl<'e> From<Tuple<'e>> for Vec<Object<'e>> {
+    fn from(tuple: Tuple<'e>) -> Self {
         tuple.0
     }
 }
 
-impl PyValue for Tuple {
-    fn py_type(&self, _heap: &Heap) -> &'static str {
+impl<'e> PyValue<'e> for Tuple<'e> {
+    fn py_type(&self, _heap: &Heap<'e>) -> &'static str {
         "tuple"
     }
 
-    fn py_len(&self, _heap: &Heap) -> Option<usize> {
+    fn py_len(&self, _heap: &Heap<'e>) -> Option<usize> {
         Some(self.0.len())
     }
 
-    fn py_getitem(&self, key: &Object, heap: &mut Heap) -> RunResult<'static, Object> {
+    fn py_getitem(&self, key: &Object<'e>, heap: &mut Heap<'e>) -> RunResult<'static, Object<'e>> {
         // Extract integer index from key, returning TypeError if not an int
         let index = match key {
             Object::Int(i) => *i,
@@ -100,7 +100,7 @@ impl PyValue for Tuple {
         Ok(self.0[normalized_index as usize].clone_with_heap(heap))
     }
 
-    fn py_eq(&self, other: &Self, heap: &mut Heap) -> bool {
+    fn py_eq(&self, other: &Self, heap: &mut Heap<'e>) -> bool {
         if self.0.len() != other.0.len() {
             return false;
         }
@@ -124,15 +124,20 @@ impl PyValue for Tuple {
     }
 
     /// Tuples don't support attribute calls.
-    fn py_call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, _args: Args) -> RunResult<'c, Object> {
+    fn py_call_attr(
+        &mut self,
+        heap: &mut Heap<'e>,
+        attr: &Attr,
+        _args: ArgObjects<'e>,
+    ) -> RunResult<'static, Object<'e>> {
         Err(ExcType::attribute_error(self.py_type(heap), attr))
     }
 
-    fn py_bool(&self, _heap: &Heap) -> bool {
+    fn py_bool(&self, _heap: &Heap<'e>) -> bool {
         !self.0.is_empty()
     }
 
-    fn py_repr<'h>(&'h self, heap: &'h Heap) -> Cow<'h, str> {
+    fn py_repr<'a>(&'a self, heap: &'a Heap<'e>) -> Cow<'a, str> {
         Cow::Owned(repr_sequence('(', ')', &self.0, heap))
     }
 }

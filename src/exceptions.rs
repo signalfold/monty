@@ -32,12 +32,12 @@ pub enum ExcType {
 
 impl ExcType {
     #[must_use]
-    pub fn attribute_error<'c>(type_str: &str, attr: &Attr) -> RunError<'c> {
+    pub fn attribute_error(type_str: &str, attr: &Attr) -> RunError<'static> {
         exc_fmt!(Self::AttributeError; "'{type_str}' object has no attribute '{attr}'").into()
     }
 
     #[must_use]
-    pub fn type_error_not_sub<'c>(type_str: &str) -> RunError<'c> {
+    pub fn type_error_not_sub(type_str: &str) -> RunError<'static> {
         exc_fmt!(Self::TypeError; "'{type_str}' object is not subscriptable").into()
     }
 
@@ -45,7 +45,7 @@ impl ExcType {
     ///
     /// This matches Python's error message: `TypeError: unhashable type: 'list'`
     #[must_use]
-    pub fn type_error_unhashable<'c>(type_str: &str) -> RunError<'c> {
+    pub fn type_error_unhashable(type_str: &str) -> RunError<'static> {
         exc_fmt!(Self::TypeError; "unhashable type: '{type_str}'").into()
     }
 
@@ -54,8 +54,9 @@ impl ExcType {
     /// For string keys, uses the raw string value without extra quoting.
     /// For other types, uses repr.
     #[must_use]
-    pub fn key_error<'c>(key: &Object, heap: &Heap) -> RunError<'c> {
+    pub fn key_error(key: &Object<'_>, heap: &Heap<'_>) -> RunError<'static> {
         let key_str = match key {
+            Object::InternString(s) => (*s).to_owned(),
             Object::Ref(id) => {
                 if let HeapData::Str(s) = heap.get(*id) {
                     s.as_str().to_owned()
@@ -79,7 +80,7 @@ impl ExcType {
     /// * `expected` - Number of expected arguments
     /// * `actual` - Number of arguments actually provided
     #[must_use]
-    pub fn type_error_arg_count<'c>(name: &str, expected: usize, actual: usize) -> RunError<'c> {
+    pub fn type_error_arg_count(name: &str, expected: usize, actual: usize) -> RunError<'static> {
         if expected == 1 {
             // CPython: "len() takes exactly one argument (2 given)"
             exc_fmt!(Self::TypeError; "{}() takes exactly one argument ({} given)", name, actual).into()
@@ -97,7 +98,7 @@ impl ExcType {
     /// * `name` - The method name (e.g., "dict.keys")
     /// * `actual` - Number of arguments actually provided
     #[must_use]
-    pub fn type_error_no_args<'c>(name: &str, actual: usize) -> RunError<'c> {
+    pub fn type_error_no_args(name: &str, actual: usize) -> RunError<'static> {
         // CPython: "dict.keys() takes no arguments (1 given)"
         exc_fmt!(Self::TypeError; "{}() takes no arguments ({} given)", name, actual).into()
     }
@@ -111,7 +112,7 @@ impl ExcType {
     /// * `min` - Minimum number of required arguments
     /// * `actual` - Number of arguments actually provided
     #[must_use]
-    pub fn type_error_at_least<'c>(name: &str, min: usize, actual: usize) -> RunError<'c> {
+    pub fn type_error_at_least(name: &str, min: usize, actual: usize) -> RunError<'static> {
         // CPython: "get expected at least 1 argument, got 0"
         exc_fmt!(Self::TypeError; "{} expected at least {} argument, got {}", name, min, actual).into()
     }
@@ -156,6 +157,8 @@ impl ExcType {
 }
 
 /// Simple lightweight representation of an exception.
+///
+/// This is used for performance reasons for common exception patterns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimpleException {
     exc_type: ExcType,
@@ -218,13 +221,13 @@ impl SimpleException {
     ///
     /// For other cases, uses the generic format:
     /// `unsupported operand type(s) for {op}: '{left}' and '{right}'`
-    pub(crate) fn operand_type_error<'c, 'd, T>(
-        left: &'d ExprLoc<'c>,
+    pub(crate) fn operand_type_error<'c, T>(
+        left: &ExprLoc<'c>,
         op: &Operator,
-        right: &'d ExprLoc<'c>,
+        right: &ExprLoc<'c>,
         left_object: Object,
         right_object: Object,
-        heap: &Heap,
+        heap: &Heap<'_>,
     ) -> RunResult<'c, T> {
         let left_type = left_object.py_type(heap);
         let right_type = right_object.py_type(heap);

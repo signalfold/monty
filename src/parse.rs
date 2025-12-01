@@ -7,11 +7,12 @@ use ruff_python_ast::{
 use ruff_python_parser::parse_module;
 use ruff_text_size::TextRange;
 
-use crate::expressions::{ArgsExpr, Callable, Const, Expr, ExprLoc, Identifier, Kwarg, Node};
+use crate::args::{ArgExprs, Kwarg};
+use crate::expressions::{Callable, Const, Expr, ExprLoc, Identifier, Node};
 use crate::operators::{CmpOperator, Operator};
-use crate::parse_error::{ParseError, ParseResult};
+use crate::parse_error::ParseError;
 
-pub(crate) fn parse<'c>(code: &'c str, filename: &'c str) -> ParseResult<'c, Vec<Node<'c>>> {
+pub(crate) fn parse<'c>(code: &'c str, filename: &'c str) -> Result<Vec<Node<'c>>, ParseError<'c>> {
     match parse_module(code) {
         Ok(parsed) => {
             let module = parsed.into_syntax();
@@ -43,11 +44,11 @@ impl<'c> Parser<'c> {
         }
     }
 
-    fn parse_statements(&self, statements: Vec<Stmt>) -> ParseResult<'c, Vec<Node<'c>>> {
+    fn parse_statements(&self, statements: Vec<Stmt>) -> Result<Vec<Node<'c>>, ParseError<'c>> {
         statements.into_iter().map(|f| self.parse_statement(f)).collect()
     }
 
-    fn parse_elif_else_clauses(&self, clauses: Vec<ElifElseClause>) -> ParseResult<'c, Vec<Node<'c>>> {
+    fn parse_elif_else_clauses(&self, clauses: Vec<ElifElseClause>) -> Result<Vec<Node<'c>>, ParseError<'c>> {
         let mut tail: Vec<Node<'c>> = Vec::new();
         for clause in clauses.into_iter().rev() {
             match clause.test {
@@ -66,7 +67,7 @@ impl<'c> Parser<'c> {
         Ok(tail)
     }
 
-    fn parse_statement(&self, statement: Stmt) -> ParseResult<'c, Node<'c>> {
+    fn parse_statement(&self, statement: Stmt) -> Result<Node<'c>, ParseError<'c>> {
         match statement {
             Stmt::FunctionDef(function) => {
                 if function.is_async {
@@ -160,7 +161,7 @@ impl<'c> Parser<'c> {
 
     /// `lhs = rhs` -> `lhs, rhs`
     /// Handles both simple assignments (x = value) and subscript assignments (dict[key] = value)
-    fn parse_assignment(&self, lhs: AstExpr, rhs: AstExpr) -> ParseResult<'c, Node<'c>> {
+    fn parse_assignment(&self, lhs: AstExpr, rhs: AstExpr) -> Result<Node<'c>, ParseError<'c>> {
         // Check if this is a subscript assignment like dict[key] = value
         if let AstExpr::Subscript(ast::ExprSubscript { value, slice, .. }) = lhs {
             Ok(Node::SubscriptAssign {
@@ -177,7 +178,7 @@ impl<'c> Parser<'c> {
         }
     }
 
-    fn parse_expression(&self, expression: AstExpr) -> ParseResult<'c, ExprLoc<'c>> {
+    fn parse_expression(&self, expression: AstExpr) -> Result<ExprLoc<'c>, ParseError<'c>> {
         match expression {
             AstExpr::BoolOp(ast::ExprBoolOp { op, values, range, .. }) => {
                 if values.len() != 2 {
@@ -257,13 +258,13 @@ impl<'c> Parser<'c> {
                     .into_vec()
                     .into_iter()
                     .map(|f| self.parse_expression(f))
-                    .collect::<ParseResult<Vec<_>>>()?;
+                    .collect::<Result<Vec<_>, ParseError<'c>>>()?;
                 let kwargs = keywords
                     .into_vec()
                     .into_iter()
                     .map(|f| self.parse_kwargs(f))
-                    .collect::<ParseResult<Vec<_>>>()?;
-                let args = ArgsExpr::new(args, kwargs);
+                    .collect::<Result<Vec<_>, ParseError<'c>>>()?;
+                let args = ArgExprs::new(args, kwargs);
                 let position = self.convert_range(range);
                 match *func {
                     AstExpr::Name(ast::ExprName { id, range, .. }) => {
@@ -294,7 +295,7 @@ impl<'c> Parser<'c> {
             AstExpr::TString(_) => Err(ParseError::Todo("FormattedValue")),
             AstExpr::StringLiteral(ast::ExprStringLiteral { value, range, .. }) => Ok(ExprLoc::new(
                 self.convert_range(range),
-                Expr::Constant(Const::Str(value.to_str().to_string())),
+                Expr::Constant(Const::Str(value.to_string())),
             )),
             AstExpr::BytesLiteral(ast::ExprBytesLiteral { value, range, .. }) => {
                 let bytes: Cow<'_, [u8]> = Cow::from(&value);
@@ -344,7 +345,7 @@ impl<'c> Parser<'c> {
                 let items = elts
                     .into_iter()
                     .map(|f| self.parse_expression(f))
-                    .collect::<ParseResult<_>>()?;
+                    .collect::<Result<_, ParseError<'c>>>()?;
 
                 Ok(ExprLoc::new(self.convert_range(range), Expr::List(items)))
             }
@@ -352,7 +353,7 @@ impl<'c> Parser<'c> {
                 let items = elts
                     .into_iter()
                     .map(|f| self.parse_expression(f))
-                    .collect::<ParseResult<_>>()?;
+                    .collect::<Result<_, ParseError<'c>>>()?;
 
                 Ok(ExprLoc::new(self.convert_range(range), Expr::Tuple(items)))
             }
@@ -361,7 +362,7 @@ impl<'c> Parser<'c> {
         }
     }
 
-    fn parse_kwargs(&self, kwarg: Keyword) -> ParseResult<'c, Kwarg<'c>> {
+    fn parse_kwargs(&self, kwarg: Keyword) -> Result<Kwarg<'c>, ParseError<'c>> {
         let key = match kwarg.arg {
             Some(key) => self.identifier_from_node(key),
             None => return Err(ParseError::Todo("kwargs with no key")),
@@ -370,7 +371,7 @@ impl<'c> Parser<'c> {
         Ok(Kwarg { key, value })
     }
 
-    fn parse_identifier(&self, ast: AstExpr) -> ParseResult<'c, Identifier<'c>> {
+    fn parse_identifier(&self, ast: AstExpr) -> Result<Identifier<'c>, ParseError<'c>> {
         match ast {
             AstExpr::Name(ast::ExprName { id, range, .. }) => {
                 Ok(Identifier::new(id.to_string(), self.convert_range(range)))
@@ -417,7 +418,7 @@ impl<'c> Parser<'c> {
     }
 }
 
-fn first<T: fmt::Debug>(v: Vec<T>) -> ParseResult<'static, T> {
+fn first<T: fmt::Debug>(v: Vec<T>) -> Result<T, ParseError<'static>> {
     if v.len() == 1 {
         v.into_iter()
             .next()

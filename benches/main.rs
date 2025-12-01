@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 
 /// Benchmarks adding two numbers using Monty interpreter
 fn add_two_monty(bench: &mut Bencher) {
-    let mut ex = Executor::new("1 + 2", "test.py", &[]).unwrap();
+    let ex = Executor::new("1 + 2", "test.py", &[]).unwrap();
 
     let r = ex.run(vec![]).unwrap();
     let int_value: i64 = (&r.value().unwrap()).try_into().unwrap();
@@ -48,7 +48,7 @@ fn add_two_cpython(bench: &mut Bencher) {
 }
 
 fn dict_set_get_monty(bench: &mut Bencher) {
-    let mut ex = Executor::new(
+    let ex = Executor::new(
         "
 a = {}
 a['key'] = 'value'
@@ -100,7 +100,7 @@ fn dict_set_get_cpython(bench: &mut Bencher) {
 }
 
 fn list_append_monty(bench: &mut Bencher) {
-    let mut ex = Executor::new(
+    let ex = Executor::new(
         "
 a = []
 a.append(42)
@@ -163,7 +163,7 @@ len(v)
 
 /// Benchmarks a loop with modulo operations using Monty interpreter
 fn loop_mod_13_monty(bench: &mut Bencher) {
-    let mut ex = Executor::new(LOOP_MOD_13_CODE, "test.py", &[]).unwrap();
+    let ex = Executor::new(LOOP_MOD_13_CODE, "test.py", &[]).unwrap();
     let r = ex.run(vec![]).unwrap();
     let int_value: i64 = (&r.value().unwrap()).try_into().unwrap();
     assert_eq!(int_value, 77);
@@ -211,7 +211,7 @@ fn loop_mod_13_cpython(bench: &mut Bencher) {
 /// Benchmarks end-to-end execution (parsing + running) using Monty
 fn end_to_end_monty(bench: &mut Bencher) {
     bench.iter(|| {
-        let mut ex = Executor::new(black_box("1 + 2"), "test.py", &[]).unwrap();
+        let ex = Executor::new(black_box("1 + 2"), "test.py", &[]).unwrap();
         let r = ex.run(vec![]).unwrap();
         let int_value: i64 = (&r.value().unwrap()).try_into().unwrap();
         black_box(int_value);
