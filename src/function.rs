@@ -1,4 +1,5 @@
-use std::{borrow::Cow, fmt};
+use std::fmt;
+use std::fmt::Write;
 
 use crate::{
     args::ArgValues,
@@ -223,8 +224,9 @@ impl<'c> Function<'c> {
         }
     }
 
-    pub fn py_repr(&self) -> Cow<'_, str> {
-        format!("<function '{}' at 0x{:x}>", self, self.id()).into()
+    /// Writes the Python repr() string for this function to a formatter.
+    pub fn py_repr_fmt<W: Write>(&self, f: &mut W) -> std::fmt::Result {
+        write!(f, "<function '{}' at 0x{:x}>", self, self.id())
     }
 
     pub fn id(&self) -> usize {

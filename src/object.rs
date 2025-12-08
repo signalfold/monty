@@ -3,6 +3,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
+use ahash::AHashSet;
 use indexmap::IndexMap;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::ser::SerializeMap;
@@ -11,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::{
     exceptions::{ExcType, SimpleException},
     expressions::FrameExit,
-    heap::{Heap, HeapData},
+    heap::{Heap, HeapData, HeapId},
     resource::ResourceTracker,
     value::Value,
     values::{
@@ -92,15 +93,25 @@ pub enum PyObject {
     },
     /// Fallback for values that cannot be represented as other variants.
     ///
-    /// Contains the `repr()` string of the original value. This is output-only
-    /// and cannot be used as an input to `Executor::run()`.
+    /// Contains the `repr()` string of the original value.
+    ///
+    /// This is output-only and cannot be used as an input to `Executor::run()`.
     Repr(String),
+    /// Represents a cycle detected during Value-to-PyObject conversion.
+    ///
+    /// When converting cyclic structures (e.g., `a = []; a.append(a)`), this variant
+    /// is used to break the infinite recursion. Contains the type-specific placeholder
+    /// string (e.g., `"[...]"` for lists, `"{...}"` for dicts).
+    ///
+    /// This is output-only and cannot be used as an input to `Executor::run()`.
+    Cycle((usize, &'static str)),
 }
 
 impl fmt::Display for PyObject {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::String(s) => f.write_str(s),
+            Self::Cycle((_, placeholder)) => f.write_str(placeholder),
             _ => self.repr_fmt(f),
         }
     }
@@ -170,10 +181,25 @@ impl PyObject {
                 Ok(Value::Exc(exc))
             }
             Self::Repr(_) => Err(InvalidInputError::new("Repr")),
+            Self::Cycle(_) => Err(InvalidInputError::new("Cycle")),
         }
     }
 
     fn from_value<T: ResourceTracker>(object: &Value, heap: &Heap<'_, '_, T>) -> Self {
+        let mut visited = AHashSet::new();
+        Self::from_value_inner(object, heap, &mut visited)
+    }
+
+    /// Internal helper for converting Value to PyObject with cycle detection.
+    ///
+    /// The `visited` set tracks HeapIds we're currently processing. When we encounter
+    /// a HeapId already in the set, we've found a cycle and return `PyObject::Cycle`
+    /// with an appropriate placeholder string.
+    fn from_value_inner<T: ResourceTracker>(
+        object: &Value,
+        heap: &Heap<'_, '_, T>,
+        visited: &mut AHashSet<HeapId>,
+    ) -> Self {
         match object {
             Value::Undefined => panic!("Undefined found while converting to PyObject"),
             Value::Ellipsis => Self::Ellipsis,
@@ -187,37 +213,60 @@ impl PyObject {
                 exc_type: exc.exc_type(),
                 arg: exc.arg().map(ToString::to_string),
             },
-            Value::Ref(id) => match heap.get(*id) {
-                HeapData::Str(s) => Self::String(s.as_str().to_owned()),
-                HeapData::Bytes(b) => Self::Bytes(b.as_slice().to_owned()),
-                HeapData::List(list) => Self::List(
-                    list.as_vec()
-                        .iter()
-                        .map(|obj| PyObject::from_value(obj, heap))
-                        .collect(),
-                ),
-                HeapData::Tuple(tuple) => Self::Tuple(
-                    tuple
-                        .as_vec()
-                        .iter()
-                        .map(|obj| PyObject::from_value(obj, heap))
-                        .collect(),
-                ),
-                HeapData::Dict(dict) => {
-                    let mut new_dict = IndexMap::with_capacity(dict.as_index_map().len());
-                    for bucket in dict.as_index_map().values() {
-                        for (k, v) in bucket {
-                            new_dict.insert(PyObject::from_value(k, heap), PyObject::from_value(v, heap));
+            Value::Ref(id) => {
+                // Check for cycle
+                if visited.contains(id) {
+                    // Cycle detected - return appropriate placeholder
+                    return match heap.get(*id) {
+                        HeapData::List(_) => Self::Cycle((*id, "[...]")),
+                        HeapData::Tuple(_) => Self::Cycle((*id, "(...)")),
+                        HeapData::Dict(_) => Self::Cycle((*id, "{...}")),
+                        _ => Self::Cycle((*id, "...")),
+                    };
+                }
+
+                // Mark this id as being visited
+                visited.insert(*id);
+
+                let result = match heap.get(*id) {
+                    HeapData::Str(s) => Self::String(s.as_str().to_owned()),
+                    HeapData::Bytes(b) => Self::Bytes(b.as_slice().to_owned()),
+                    HeapData::List(list) => Self::List(
+                        list.as_vec()
+                            .iter()
+                            .map(|obj| PyObject::from_value_inner(obj, heap, visited))
+                            .collect(),
+                    ),
+                    HeapData::Tuple(tuple) => Self::Tuple(
+                        tuple
+                            .as_vec()
+                            .iter()
+                            .map(|obj| PyObject::from_value_inner(obj, heap, visited))
+                            .collect(),
+                    ),
+                    HeapData::Dict(dict) => {
+                        let mut new_dict = IndexMap::with_capacity(dict.as_index_map().len());
+                        for bucket in dict.as_index_map().values() {
+                            for (k, v) in bucket {
+                                new_dict.insert(
+                                    PyObject::from_value_inner(k, heap, visited),
+                                    PyObject::from_value_inner(v, heap, visited),
+                                );
+                            }
                         }
+                        Self::Dict(new_dict)
                     }
-                    Self::Dict(new_dict)
-                }
-                // Cells are internal closure implementation details
-                HeapData::Cell(inner) => {
-                    // Show the cell's contents
-                    PyObject::from_value(inner, heap)
-                }
-            },
+                    // Cells are internal closure implementation details
+                    HeapData::Cell(inner) => {
+                        // Show the cell's contents
+                        PyObject::from_value_inner(inner, heap, visited)
+                    }
+                };
+
+                // Remove from visited set after processing
+                visited.remove(id);
+                result
+            }
             #[cfg(feature = "dec-ref-check")]
             Value::Dereferenced => panic!("Dereferenced found while converting to PyObject"),
             _ => Self::Repr(object.py_repr(heap).into_owned()),
@@ -302,6 +351,7 @@ impl PyObject {
                 f.write_char(')')
             }
             Self::Repr(s) => write!(f, "Repr({})", string_repr(s)),
+            Self::Cycle((_, placeholder)) => f.write_str(placeholder),
         }
     }
 
@@ -329,6 +379,7 @@ impl PyObject {
             Self::Dict(d) => !d.is_empty(),
             Self::Exception { .. } => true,
             Self::Repr(_) => true,
+            Self::Cycle(_) => true,
         }
     }
 
@@ -350,6 +401,7 @@ impl PyObject {
             Self::Dict(_) => "dict",
             Self::Exception { .. } => "Exception",
             Self::Repr(_) => "repr",
+            Self::Cycle(_) => "cycle",
         }
     }
 }
@@ -367,6 +419,7 @@ impl Hash for PyObject {
             Self::Float(f64) => f64.to_bits().hash(state),
             Self::String(string) => string.hash(state),
             Self::Bytes(bytes) => bytes.hash(state),
+            Self::Cycle(_) => panic!("cycle values are not hashable"),
             _ => panic!("{} python values are not hashable", self.type_name()),
         }
     }
@@ -397,6 +450,7 @@ impl PartialEq for PyObject {
                 },
             ) => a_type == b_type && a_arg == b_arg,
             (Self::Repr(a), Self::Repr(b)) => a == b,
+            (Self::Cycle((a, _)), Self::Cycle((b, _))) => a == b,
             _ => false,
         }
     }
@@ -596,6 +650,11 @@ impl Serialize for PyObject {
             Self::Repr(s) => {
                 let mut map = serializer.serialize_map(Some(1))?;
                 map.serialize_entry("$repr", s)?;
+                map.end()
+            }
+            Self::Cycle((_, placeholder)) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("$cycle", placeholder)?;
                 map.end()
             }
         }

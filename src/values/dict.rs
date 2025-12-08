@@ -1,6 +1,6 @@
-use std::borrow::Cow;
 use std::fmt::Write;
 
+use ahash::AHashSet;
 use indexmap::IndexMap;
 
 use crate::args::ArgValues;
@@ -338,26 +338,30 @@ impl<'c, 'e> PyTrait<'c, 'e> for Dict<'c, 'e> {
         !self.is_empty()
     }
 
-    fn py_repr<'a, T: ResourceTracker>(&'a self, heap: &'a Heap<'c, 'e, T>) -> Cow<'a, str> {
+    fn py_repr_fmt<W: Write, T: ResourceTracker>(
+        &self,
+        f: &mut W,
+        heap: &Heap<'c, 'e, T>,
+        heap_ids: &mut AHashSet<usize>,
+    ) -> std::fmt::Result {
         if self.is_empty() {
-            return Cow::Borrowed("{}");
+            return f.write_str("{}");
         }
 
-        let mut s = String::from("{");
+        f.write_char('{')?;
         let mut first = true;
         for bucket in self.map.values() {
             for (k, v) in bucket {
                 if !first {
-                    s.push_str(", ");
+                    f.write_str(", ")?;
                 }
                 first = false;
-                let key_repr = k.py_repr(heap);
-                let val_repr = v.py_repr(heap);
-                let _ = write!(s, "{key_repr}: {val_repr}");
+                k.py_repr_fmt(f, heap, heap_ids)?;
+                f.write_str(": ")?;
+                v.py_repr_fmt(f, heap, heap_ids)?;
             }
         }
-        s.push('}');
-        Cow::Owned(s)
+        f.write_char('}')
     }
 
     fn py_getitem<T: ResourceTracker>(

@@ -1,5 +1,7 @@
 use core::fmt;
-use std::borrow::Cow;
+use std::fmt::Write;
+
+use ahash::AHashSet;
 
 use crate::{
     args::ArgValues,
@@ -93,11 +95,17 @@ impl<'c> Callable<'c> {
         Value::Callable(self.clone())
     }
 
-    pub fn py_repr<'a, 'e, T: ResourceTracker>(&'a self, heap: &'a Heap<'c, 'e, T>) -> Cow<'a, str> {
+    /// Writes the Python repr() string for this callable to a formatter.
+    pub fn py_repr_fmt<'e, W: Write, T: ResourceTracker>(
+        &self,
+        f: &mut W,
+        heap: &Heap<'c, 'e, T>,
+        heap_ids: &mut AHashSet<usize>,
+    ) -> std::fmt::Result {
         match self {
-            Self::Builtin(b) => format!("<built-in function {}>", b.as_ref()).into(),
-            Self::ExcType(e) => format!("<class '{}'>", <&'static str>::from(*e)).into(),
-            Self::Name(name) => heap.get(name.heap_id()).py_repr(heap),
+            Self::Builtin(b) => write!(f, "<built-in function {}>", b.as_ref()),
+            Self::ExcType(e) => write!(f, "<class '{}'>", <&'static str>::from(*e)),
+            Self::Name(name) => heap.get(name.heap_id()).py_repr_fmt(f, heap, heap_ids),
         }
     }
 

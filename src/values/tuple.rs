@@ -3,14 +3,16 @@
 /// This type provides Python tuple semantics. Tuples are immutable sequences
 /// that can contain any Python object. Like lists, tuples properly handle
 /// reference counting for heap-allocated values.
-use std::borrow::Cow;
+use std::fmt::Write;
+
+use ahash::AHashSet;
 
 use crate::exceptions::ExcType;
 use crate::heap::{Heap, HeapId};
 use crate::resource::ResourceTracker;
 use crate::run::RunResult;
 use crate::value::Value;
-use crate::values::list::repr_sequence;
+use crate::values::list::repr_sequence_fmt;
 use crate::values::PyTrait;
 
 /// Python tuple value stored on the heap.
@@ -140,7 +142,12 @@ impl<'c, 'e> PyTrait<'c, 'e> for Tuple<'c, 'e> {
         !self.0.is_empty()
     }
 
-    fn py_repr<'a, T: ResourceTracker>(&'a self, heap: &'a Heap<'c, 'e, T>) -> Cow<'a, str> {
-        Cow::Owned(repr_sequence('(', ')', &self.0, heap))
+    fn py_repr_fmt<W: Write, T: ResourceTracker>(
+        &self,
+        f: &mut W,
+        heap: &Heap<'c, 'e, T>,
+        heap_ids: &mut AHashSet<usize>,
+    ) -> std::fmt::Result {
+        repr_sequence_fmt('(', ')', &self.0, f, heap, heap_ids)
     }
 }

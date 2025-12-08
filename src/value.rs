@@ -1,8 +1,10 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
+use std::fmt::Write;
 use std::hash::{Hash, Hasher};
 
+use ahash::AHashSet;
 use strum::Display;
 
 use crate::args::ArgValues;
@@ -13,8 +15,8 @@ use crate::heap::HeapData;
 use crate::heap::{Heap, HeapId};
 use crate::resource::ResourceTracker;
 use crate::run::RunResult;
-use crate::values::bytes::bytes_repr;
-use crate::values::str::string_repr;
+use crate::values::bytes::bytes_repr_fmt;
+use crate::values::str::string_repr_fmt;
 use crate::values::PyTrait;
 
 /// Primary value type representing Python objects at runtime.
@@ -228,37 +230,58 @@ impl<'c, 'e> PyTrait<'c, 'e> for Value<'c, 'e> {
         }
     }
 
-    fn py_repr<'a, T: ResourceTracker>(&'a self, heap: &'a Heap<'c, 'e, T>) -> Cow<'a, str> {
+    fn py_repr_fmt<W: Write, T: ResourceTracker>(
+        &self,
+        f: &mut W,
+        heap: &Heap<'c, 'e, T>,
+        heap_ids: &mut AHashSet<usize>,
+    ) -> std::fmt::Result {
         match self {
-            Self::Undefined => "Undefined".into(),
-            Self::Ellipsis => "Ellipsis".into(),
-            Self::None => "None".into(),
-            Self::Bool(true) => "True".into(),
-            Self::Bool(false) => "False".into(),
-            Self::Int(v) => format!("{v}").into(),
+            Self::Undefined => f.write_str("Undefined"),
+            Self::Ellipsis => f.write_str("Ellipsis"),
+            Self::None => f.write_str("None"),
+            Self::Bool(true) => f.write_str("True"),
+            Self::Bool(false) => f.write_str("False"),
+            Self::Int(v) => write!(f, "{v}"),
             Self::Float(v) => {
                 let s = v.to_string();
                 if s.contains('.') {
-                    s.into()
+                    f.write_str(&s)
                 } else {
-                    format!("{s}.0").into()
+                    write!(f, "{s}.0")
                 }
             }
-            Self::Range(size) => format!("0:{size}").into(),
-            Self::Exc(exc) => format!("{exc}").into(),
-            Self::Callable(c) => c.py_repr(heap),
-            Self::Function(f) | Self::Closure(f, _) => f.py_repr(),
-            Self::InternString(s) => string_repr(s).into(),
-            Self::InternBytes(b) => bytes_repr(b).into(),
-            Self::Ref(id) => heap.get(*id).py_repr(heap),
+            Self::Range(size) => write!(f, "0:{size}"),
+            Self::Exc(exc) => write!(f, "{exc}"),
+            Self::Callable(c) => c.py_repr_fmt(f, heap, heap_ids),
+            Self::Function(func) | Self::Closure(func, _) => func.py_repr_fmt(f),
+            Self::InternString(s) => string_repr_fmt(s, f),
+            Self::InternBytes(b) => bytes_repr_fmt(b, f),
+            Self::Ref(id) => {
+                if heap_ids.contains(id) {
+                    // Cycle detected - write type-specific placeholder following Python semantics
+                    match heap.get(*id) {
+                        HeapData::List(_) => f.write_str("[...]"),
+                        HeapData::Tuple(_) => f.write_str("(...)"),
+                        HeapData::Dict(_) => f.write_str("{...}"),
+                        // Other types don't typically have cycles, but handle gracefully
+                        _ => f.write_str("..."),
+                    }
+                } else {
+                    heap_ids.insert(*id);
+                    let result = heap.get(*id).py_repr_fmt(f, heap, heap_ids);
+                    heap_ids.remove(id);
+                    result
+                }
+            }
             #[cfg(feature = "dec-ref-check")]
             Self::Dereferenced => panic!("Cannot access Dereferenced object"),
         }
     }
 
-    fn py_str<'a, T: ResourceTracker>(&'a self, heap: &'a Heap<'c, 'e, T>) -> Cow<'a, str> {
+    fn py_str<T: ResourceTracker>(&self, heap: &Heap<'c, 'e, T>) -> Cow<'static, str> {
         match self {
-            Self::InternString(s) => (*s).into(),
+            Self::InternString(s) => (*s).to_string().into(),
             Self::Ref(id) => heap.get(*id).py_str(heap),
             _ => self.py_repr(heap),
         }

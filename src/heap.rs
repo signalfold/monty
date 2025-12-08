@@ -1,7 +1,10 @@
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+use std::fmt::Write;
 use std::hash::{Hash, Hasher};
+
+use ahash::AHashSet;
 
 use crate::args::ArgValues;
 use crate::resource::{ResourceError, ResourceTracker};
@@ -148,19 +151,24 @@ impl<'c, 'e> PyTrait<'c, 'e> for HeapData<'c, 'e> {
         }
     }
 
-    fn py_repr<'a, T: ResourceTracker>(&'a self, heap: &'a Heap<'c, 'e, T>) -> Cow<'a, str> {
+    fn py_repr_fmt<W: Write, T: ResourceTracker>(
+        &self,
+        f: &mut W,
+        heap: &Heap<'c, 'e, T>,
+        heap_ids: &mut AHashSet<usize>,
+    ) -> std::fmt::Result {
         match self {
-            Self::Str(s) => s.py_repr(heap),
-            Self::Bytes(b) => b.py_repr(heap),
-            Self::List(l) => l.py_repr(heap),
-            Self::Tuple(t) => t.py_repr(heap),
-            Self::Dict(d) => d.py_repr(heap),
+            Self::Str(s) => s.py_repr_fmt(f, heap, heap_ids),
+            Self::Bytes(b) => b.py_repr_fmt(f, heap, heap_ids),
+            Self::List(l) => l.py_repr_fmt(f, heap, heap_ids),
+            Self::Tuple(t) => t.py_repr_fmt(f, heap, heap_ids),
+            Self::Dict(d) => d.py_repr_fmt(f, heap, heap_ids),
             // Cell repr shows the contained value's type
-            Self::Cell(v) => format!("<cell: {} object>", v.py_type(Some(heap))).into(),
+            Self::Cell(v) => write!(f, "<cell: {} object>", v.py_type(Some(heap))),
         }
     }
 
-    fn py_str<'a, T: ResourceTracker>(&'a self, heap: &'a Heap<'c, 'e, T>) -> Cow<'a, str> {
+    fn py_str<T: ResourceTracker>(&self, heap: &Heap<'c, 'e, T>) -> Cow<'static, str> {
         match self {
             Self::Str(s) => s.py_str(heap),
             Self::Bytes(b) => b.py_str(heap),

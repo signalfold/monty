@@ -8,6 +8,9 @@
 /// dispatch on `HeapData` without boxing overhead.
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::fmt::Write;
+
+use ahash::AHashSet;
 
 use crate::args::ArgValues;
 use crate::exceptions::ExcType;
@@ -77,11 +80,36 @@ pub trait PyTrait<'c, 'e> {
         self.py_len(heap) != Some(0)
     }
 
+    /// Writes the Python `repr()` string for this value to a formatter.
+    ///
+    /// This method enables cycle detection for self-referential structures by tracking
+    /// visited heap IDs. When a cycle is detected (ID already in `heap_ids`), implementations
+    /// should write an ellipsis (e.g., `[...]` for lists, `{...}` for dicts).
+    ///
+    /// # Arguments
+    /// * `f` - The formatter to write to
+    /// * `heap` - The heap for resolving value references
+    /// * `heap_ids` - Set of heap IDs currently being repr'd (for cycle detection)
+    fn py_repr_fmt<W: Write, T: ResourceTracker>(
+        &self,
+        f: &mut W,
+        heap: &Heap<'c, 'e, T>,
+        heap_ids: &mut AHashSet<usize>,
+    ) -> std::fmt::Result;
+
     /// Returns the Python `repr()` string for this value.
-    fn py_repr<'a, T: ResourceTracker>(&'a self, _heap: &'a Heap<'c, 'e, T>) -> Cow<'a, str>;
+    ///
+    /// Convenience wrapper around `py_repr_fmt` that returns an owned string.
+    fn py_repr<T: ResourceTracker>(&self, heap: &Heap<'c, 'e, T>) -> Cow<'static, str> {
+        let mut s = String::new();
+        let mut heap_ids = AHashSet::new();
+        // Unwrap is safe: writing to String never fails
+        self.py_repr_fmt(&mut s, heap, &mut heap_ids).unwrap();
+        Cow::Owned(s)
+    }
 
     /// Returns the Python `str()` string for this value.
-    fn py_str<'a, T: ResourceTracker>(&'a self, heap: &'a Heap<'c, 'e, T>) -> Cow<'a, str> {
+    fn py_str<T: ResourceTracker>(&self, heap: &Heap<'c, 'e, T>) -> Cow<'static, str> {
         self.py_repr(heap)
     }
 

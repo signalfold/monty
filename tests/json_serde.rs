@@ -121,6 +121,27 @@ fn json_output_repr() {
     assert_eq!(serde_json::to_string(&obj).unwrap(), r#"{"$repr":"<function foo>"}"#);
 }
 
+#[test]
+fn json_output_cycle_list() {
+    // Test JSON serialization of cyclic list
+    let ex = Executor::new("a = []; a.append(a); a", "test.py", &[]).unwrap();
+    let result = ex.run_no_limits(vec![]).unwrap();
+    // The cyclic reference becomes PyObject::Cycle("[...]")
+    assert_eq!(serde_json::to_string(&result).unwrap(), r#"[{"$cycle":"[...]"}]"#);
+}
+
+#[test]
+fn json_output_cycle_dict() {
+    // Test JSON serialization of cyclic dict
+    let ex = Executor::new("d = {}; d['self'] = d; d", "test.py", &[]).unwrap();
+    let result = ex.run_no_limits(vec![]).unwrap();
+    // The cyclic reference becomes PyObject::Cycle("{...}")
+    assert_eq!(
+        serde_json::to_string(&result).unwrap(),
+        r#"{"self":{"$cycle":"{...}"}}"#
+    );
+}
+
 // === Round-trip Tests ===
 
 #[test]
@@ -140,4 +161,73 @@ fn json_roundtrip_empty() {
     let dict: PyObject = serde_json::from_str("{}").unwrap();
     assert_eq!(serde_json::to_string(&list).unwrap(), "[]");
     assert_eq!(serde_json::to_string(&dict).unwrap(), "{}");
+}
+
+// === Cycle Equality Tests ===
+
+#[test]
+fn cycle_equality_same_id() {
+    // Multiple references to the same cyclic object should produce equal Cycle values
+    // because they share the same heap ID
+    let ex = Executor::new("a = []; a.append(a); [a, a]", "test.py", &[]).unwrap();
+    let result = ex.run_no_limits(vec![]).unwrap();
+
+    // Result should be a list containing two identical cyclic lists
+    if let PyObject::List(outer) = &result {
+        assert_eq!(outer.len(), 2, "outer list should have 2 elements");
+
+        // Both inner lists should contain the same Cycle reference
+        if let (PyObject::List(inner1), PyObject::List(inner2)) = (&outer[0], &outer[1]) {
+            assert_eq!(inner1.len(), 1);
+            assert_eq!(inner2.len(), 1);
+
+            // The cycle references should be equal (same heap ID)
+            assert_eq!(inner1[0], inner2[0], "cycles referencing same object should be equal");
+
+            // Verify they are actually Cycle variants
+            assert!(matches!(&inner1[0], PyObject::Cycle(_)));
+        } else {
+            panic!("expected inner lists");
+        }
+    } else {
+        panic!("expected outer list");
+    }
+}
+
+#[test]
+fn cycle_equality_different_ids() {
+    // Two separate cyclic objects should produce unequal Cycle values
+    // because they have different heap IDs
+    let ex = Executor::new("a = []; a.append(a); b = []; b.append(b); [a, b]", "test.py", &[]).unwrap();
+    let result = ex.run_no_limits(vec![]).unwrap();
+
+    // Result should be a list containing two different cyclic lists
+    if let PyObject::List(outer) = &result {
+        assert_eq!(outer.len(), 2, "outer list should have 2 elements");
+
+        // Both inner lists contain their own cycle references
+        if let (PyObject::List(inner1), PyObject::List(inner2)) = (&outer[0], &outer[1]) {
+            assert_eq!(inner1.len(), 1);
+            assert_eq!(inner2.len(), 1);
+
+            // The cycle references should NOT be equal (different heap IDs)
+            assert_ne!(
+                inner1[0], inner2[0],
+                "cycles referencing different objects should not be equal"
+            );
+
+            // Verify they are both Cycle variants with same placeholder but different IDs
+            if let (PyObject::Cycle((id1, ph1)), PyObject::Cycle((id2, ph2))) = (&inner1[0], &inner2[0]) {
+                assert_ne!(id1, id2, "heap IDs should differ");
+                assert_eq!(ph1, ph2, "placeholders should match (both are lists)");
+                assert_eq!(*ph1, "[...]");
+            } else {
+                panic!("expected Cycle variants");
+            }
+        } else {
+            panic!("expected inner lists");
+        }
+    } else {
+        panic!("expected outer list");
+    }
 }

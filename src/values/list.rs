@@ -1,4 +1,6 @@
-use std::borrow::Cow;
+use std::fmt::Write;
+
+use ahash::AHashSet;
 
 use crate::args::ArgValues;
 use crate::exceptions::ExcType;
@@ -172,8 +174,13 @@ impl<'c, 'e> PyTrait<'c, 'e> for List<'c, 'e> {
         !self.0.is_empty()
     }
 
-    fn py_repr<'a, T: ResourceTracker>(&'a self, heap: &'a Heap<'c, 'e, T>) -> Cow<'a, str> {
-        Cow::Owned(repr_sequence('[', ']', &self.0, heap))
+    fn py_repr_fmt<W: Write, T: ResourceTracker>(
+        &self,
+        f: &mut W,
+        heap: &Heap<'c, 'e, T>,
+        heap_ids: &mut AHashSet<usize>,
+    ) -> std::fmt::Result {
+        repr_sequence_fmt('[', ']', &self.0, f, heap, heap_ids)
     }
 
     fn py_add<T: ResourceTracker>(
@@ -238,36 +245,34 @@ impl<'c, 'e> PyTrait<'c, 'e> for List<'c, 'e> {
     }
 }
 
-/// Formats a sequence of values with the given start and end characters.
+/// Writes a formatted sequence of values to a formatter.
 ///
 /// This helper function is used to implement `__repr__` for sequence types like
-/// lists and tuples. It formats items as comma-separated repr strings.
+/// lists and tuples. It writes items as comma-separated repr strings.
 ///
 /// # Arguments
 /// * `start` - The opening character (e.g., '[' for lists, '(' for tuples)
 /// * `end` - The closing character (e.g., ']' for lists, ')' for tuples)
 /// * `items` - The slice of values to format
+/// * `f` - The formatter to write to
 /// * `heap` - The heap for resolving value references
-///
-/// # Returns
-/// A string representation like "[1, 2, 3]" or "(1, 2, 3)"
-pub(crate) fn repr_sequence<'c, 'e, T: ResourceTracker>(
+/// * `heap_ids` - Set of heap IDs being repr'd (for cycle detection)
+pub(crate) fn repr_sequence_fmt<'c, 'e, W: Write, T: ResourceTracker>(
     start: char,
     end: char,
     items: &[Value<'c, 'e>],
+    f: &mut W,
     heap: &Heap<'c, 'e, T>,
-) -> String {
-    let mut s = String::from(start);
+    heap_ids: &mut AHashSet<usize>,
+) -> std::fmt::Result {
+    f.write_char(start)?;
     let mut iter = items.iter();
     if let Some(first) = iter.next() {
-        let repr = first.py_repr(heap);
-        s.push_str(repr.as_ref());
+        first.py_repr_fmt(f, heap, heap_ids)?;
         for item in iter {
-            s.push_str(", ");
-            let repr = item.py_repr(heap);
-            s.push_str(repr.as_ref());
+            f.write_str(", ")?;
+            item.py_repr_fmt(f, heap, heap_ids)?;
         }
     }
-    s.push(end);
-    s
+    f.write_char(end)
 }
