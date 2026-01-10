@@ -1,14 +1,298 @@
-//! Exception mapping between Monty and Python.
+//! Custom exception types for the Monty Python interpreter.
 //!
-//! Converts Monty's `MontyException` and `ExcType` to PyO3's `PyErr`
-//! so that Python code sees native Python exceptions.
+//! Provides a hierarchy of exception types that wrap Monty's internal exceptions,
+//! preserving traceback information and allowing Python code to distinguish
+//! between syntax errors and runtime errors from Monty-executed code.
+//!
+//! ## Exception Hierarchy
+//!
+//! ```text
+//! MontyError(Exception)        # Base class for all Monty exceptions
+//! ├── MontySyntaxError         # Raised when syntax is invalid or Monty can't parse the code
+//! └── MontyRuntimeError        # Raised when code fails during execution
+//! ```
 
-use ::monty::{ExcType, MontyException};
-use pyo3::{exceptions, prelude::*, types::PyString, PyTypeCheck};
+use ::monty::{ExcType, MontyException, StackFrame};
+use pyo3::{
+    exceptions,
+    prelude::*,
+    types::{PyDict, PyList, PyString},
+    PyTypeCheck,
+};
 
 use crate::dataclass::get_frozen_instance_error;
 
-/// Converts Monty's `MontyException` to a Python exception.
+/// Base exception for all Monty interpreter errors.
+///
+/// This is the parent class for both `MontySyntaxError` and `MontyRuntimeError`.
+/// Catching `MontyError` will catch any exception raised by Monty.
+#[pyclass(extends=pyo3::exceptions::PyException, module="monty", subclass)]
+#[derive(Clone)]
+pub struct MontyError {
+    /// The underlying Monty exception.
+    exc: MontyException,
+}
+
+impl MontyError {
+    /// Converts a Monty exception to a `PyErr`.
+    ///
+    /// For `SyntaxError` exceptions, creates a `MontySyntaxError`.
+    /// For all other exceptions, creates a `MontyRuntimeError` with all the exception
+    /// information preserved, including the traceback frames and display string.
+    #[must_use]
+    pub fn new_err(py: Python<'_>, exc: MontyException) -> PyErr {
+        // Syntax errors get their own exception type
+        if exc.exc_type() == ExcType::SyntaxError {
+            MontySyntaxError::new_err(py, exc)
+        } else {
+            MontyRuntimeError::new_err(py, exc)
+        }
+    }
+}
+
+impl MontyError {
+    /// Creates a new `MontyError` wrapping a `MontyException`.
+    #[must_use]
+    pub fn new(exc: MontyException) -> Self {
+        Self { exc }
+    }
+
+    /// Returns the exception type.
+    fn exc_type(&self) -> ExcType {
+        self.exc.exc_type()
+    }
+
+    /// Returns the exception message, if any.
+    fn message(&self) -> Option<&str> {
+        self.exc.message()
+    }
+}
+
+#[pymethods]
+impl MontyError {
+    /// Returns the inner exception as a Python exception object.
+    ///
+    /// This recreates a native Python exception (e.g., `ValueError`, `TypeError`)
+    /// from the stored exception type and message.
+    fn exception(&self, py: Python<'_>) -> Py<PyAny> {
+        let py_err = exc_monty_to_py(py, self.exc.clone());
+        py_err.into_value(py).into_any()
+    }
+
+    /// Returns formatted exception string.
+    ///
+    /// Args:
+    ///     show: 'traceback' - full traceback with exception (same as 'type-msg' for base class)
+    ///           'type-msg' - 'ExceptionType: message' format
+    ///           'msg' - just the message
+    #[pyo3(signature = (show = "traceback"))]
+    fn display(&self, show: &str) -> PyResult<String> {
+        match show {
+            "traceback" | "type-msg" => Ok(self.exc.summary()),
+            "msg" => Ok(self.message().unwrap_or_default().to_string()),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid display mode: '{show}'. Expected 'traceback', 'type-msg', or 'msg'"
+            ))),
+        }
+    }
+
+    fn __str__(&self) -> String {
+        self.message().unwrap_or_default().to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        let exc_type_name = self.exc_type();
+        if let Some(msg) = self.message() {
+            format!("MontyError({exc_type_name}: {msg})")
+        } else {
+            format!("MontyError({exc_type_name})")
+        }
+    }
+}
+
+/// Raised when Python code has syntax errors or cannot be parsed by Monty.
+///
+/// Inherits from `MontyError`. The inner exception is always a `SyntaxError`.
+#[pyclass(extends=MontyError, module="monty")]
+#[derive(Clone)]
+pub struct MontySyntaxError;
+
+impl MontySyntaxError {
+    /// Creates a new `MontySyntaxError` with the given message.
+    #[must_use]
+    pub fn new_err(py: Python<'_>, exc: MontyException) -> PyErr {
+        let base_error = MontyError::new(exc);
+        let init = PyClassInitializer::from(base_error).add_subclass(MontySyntaxError);
+        match Py::new(py, init) {
+            Ok(err) => PyErr::from_value(err.into_bound(py).into_any()),
+            Err(e) => e,
+        }
+    }
+}
+
+#[pymethods]
+impl MontySyntaxError {
+    fn __repr__(slf: PyRef<'_, Self>) -> String {
+        let parent = slf.as_super();
+        if let Some(msg) = parent.message() {
+            format!("MontySyntaxError({msg})")
+        } else {
+            "MontySyntaxError()".to_string()
+        }
+    }
+}
+
+/// Raised when Monty code fails during execution.
+///
+/// Inherits from `MontyError`. Additionally provides `traceback()` to access
+/// the Monty stack frames where the error occurred.
+#[pyclass(extends=MontyError, module="monty")]
+pub struct MontyRuntimeError {
+    /// The traceback frames where the error occurred (pre-converted to Python objects).
+    frames: Vec<Py<PyFrame>>,
+}
+
+impl MontyRuntimeError {
+    /// Creates a new `MontyRuntimeError` from the given exception data.
+    #[must_use]
+    pub fn new_err(py: Python<'_>, exc: MontyException) -> PyErr {
+        // Convert stack frames to PyFrame objects
+        let frames_result: PyResult<Vec<Py<PyFrame>>> = exc
+            .traceback()
+            .iter()
+            .map(|f| Py::new(py, PyFrame::from_stack_frame(f)))
+            .collect();
+
+        let frames = match frames_result {
+            Ok(frames) => frames,
+            Err(e) => return e,
+        };
+
+        let base_error = MontyError::new(exc);
+        // Create the MontyRuntimeError with proper initialization
+        let runtime_error = MontyRuntimeError { frames };
+
+        let init = pyo3::PyClassInitializer::from(base_error).add_subclass(runtime_error);
+        match Py::new(py, init) {
+            Ok(err) => PyErr::from_value(err.into_bound(py).into_any()),
+            Err(e) => e,
+        }
+    }
+}
+
+#[pymethods]
+impl MontyRuntimeError {
+    /// Returns the Monty traceback as a list of Frame objects.
+    fn traceback(&self, py: Python<'_>) -> Py<PyList> {
+        PyList::new(py, &self.frames)
+            .expect("failed to create frames list")
+            .unbind()
+    }
+
+    /// Returns formatted exception string.
+    ///
+    /// Overrides the base class to provide the full traceback when show='traceback'.
+    #[pyo3(signature = (show = "traceback"))]
+    fn display(slf: PyRef<'_, Self>, show: &str) -> PyResult<String> {
+        match show {
+            "traceback" => Ok(slf.as_super().exc.to_string()),
+            "type-msg" => Ok(slf.as_super().exc.summary()),
+            "msg" => Ok(slf.as_super().message().unwrap_or_default().to_string()),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid display mode: '{show}'. Expected 'traceback', 'type-msg', or 'msg'"
+            ))),
+        }
+    }
+
+    fn __str__(slf: PyRef<'_, Self>) -> String {
+        slf.as_super().message().unwrap_or_default().to_string()
+    }
+
+    fn __repr__(slf: PyRef<'_, Self>) -> String {
+        let parent = slf.as_super();
+        let exc_type_name = parent.exc_type();
+        if let Some(msg) = parent.message() {
+            format!("MontyRuntimeError({exc_type_name}: {msg})")
+        } else {
+            format!("MontyRuntimeError({exc_type_name})")
+        }
+    }
+}
+
+/// A single frame in a Monty traceback.
+///
+/// Contains all the information needed to display a traceback line:
+/// the file location, function name, and optional source code preview.
+#[pyclass(name = "Frame", module = "monty", frozen)]
+#[derive(Debug, Clone)]
+pub struct PyFrame {
+    /// The filename where the code is located.
+    #[pyo3(get)]
+    pub filename: String,
+    /// Line number (1-based).
+    #[pyo3(get)]
+    pub line: u16,
+    /// Column number (1-based).
+    #[pyo3(get)]
+    pub column: u16,
+    /// End line number (1-based).
+    #[pyo3(get)]
+    pub end_line: u16,
+    /// End column number (1-based).
+    #[pyo3(get)]
+    pub end_column: u16,
+    /// The name of the function, or None for module-level code.
+    #[pyo3(get)]
+    pub function_name: Option<String>,
+    /// The source code line for preview in the traceback.
+    #[pyo3(get)]
+    pub source_line: Option<String>,
+}
+
+#[pymethods]
+impl PyFrame {
+    fn dict(&self, py: Python<'_>) -> Py<PyDict> {
+        let dict = PyDict::new(py);
+        dict.set_item("filename", self.filename.clone()).unwrap();
+        dict.set_item("line", self.line).unwrap();
+        dict.set_item("column", self.column).unwrap();
+        dict.set_item("end_line", self.end_line).unwrap();
+        dict.set_item("end_column", self.end_column).unwrap();
+        dict.set_item("function_name", self.function_name.clone()).unwrap();
+        dict.set_item("source_line", self.source_line.clone()).unwrap();
+        dict.unbind()
+    }
+
+    fn __repr__(&self) -> String {
+        let func = self.function_name.as_ref().map_or("<module>".to_string(), Clone::clone);
+        format!(
+            "Frame(filename='{}', line={}, column={}, function_name='{}')",
+            self.filename, self.line, self.column, func
+        )
+    }
+}
+
+impl PyFrame {
+    /// Creates a `PyFrame` from Monty's `StackFrame`.
+    #[must_use]
+    pub fn from_stack_frame(frame: &StackFrame) -> Self {
+        Self {
+            filename: frame.filename.clone(),
+            line: frame.start.line,
+            column: frame.start.column,
+            end_line: frame.end.line,
+            end_column: frame.end.column,
+            function_name: frame.frame_name.clone(),
+            source_line: frame.preview_line.clone(),
+        }
+    }
+}
+
+// ============================================================================
+// Helper functions
+// ============================================================================
+
+/// Converts Monty's `MontyException` to the matching Python exception value.
 ///
 /// Creates an appropriate Python exception type with the message.
 /// The traceback information is included in the exception message
@@ -52,6 +336,8 @@ pub fn exc_monty_to_py(py: Python<'_>, exc: MontyException) -> PyErr {
 }
 
 /// Converts a python exception to monty.
+///
+/// Used when resuming execution with an exception from Python.
 pub fn exc_py_to_monty(py: Python<'_>, py_err: PyErr) -> MontyException {
     let exc = py_err.value(py);
     let exc_type = py_err_to_exc_type(exc);
