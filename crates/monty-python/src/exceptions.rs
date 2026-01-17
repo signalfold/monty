@@ -16,10 +16,10 @@
 use ::monty::{ExcType, MontyException, StackFrame};
 use monty_type_checking::TypeCheckingFailure;
 use pyo3::{
+    PyClassInitializer, PyTypeCheck,
     exceptions::{self},
     prelude::*,
     types::{PyDict, PyList, PyString},
-    PyClassInitializer, PyTypeCheck,
 };
 
 use crate::dataclass::get_frozen_instance_error;
@@ -268,10 +268,10 @@ impl MontyRuntimeError {
     fn __str__(slf: PyRef<'_, Self>) -> String {
         let parent = slf.as_super();
         let exc_type_name = parent.exc_type();
-        if let Some(msg) = parent.message() {
-            if !msg.is_empty() {
-                return format!("{exc_type_name}: {msg}");
-            }
+        if let Some(msg) = parent.message()
+            && !msg.is_empty()
+        {
+            return format!("{exc_type_name}: {msg}");
         }
         format!("{exc_type_name}")
     }
@@ -280,10 +280,10 @@ impl MontyRuntimeError {
     fn __repr__(slf: PyRef<'_, Self>) -> String {
         let parent = slf.as_super();
         let exc_type_name = parent.exc_type();
-        if let Some(msg) = parent.message() {
-            if !msg.is_empty() {
-                return format!("MontyRuntimeError({exc_type_name}: {msg})");
-            }
+        if let Some(msg) = parent.message()
+            && !msg.is_empty()
+        {
+            return format!("MontyRuntimeError({exc_type_name}: {msg})");
         }
         format!("MontyRuntimeError({exc_type_name})")
     }
@@ -384,10 +384,10 @@ pub fn exc_monty_to_py(py: Python<'_>, exc: MontyException) -> PyErr {
         ExcType::AssertionError => exceptions::PyAssertionError::new_err(msg),
         ExcType::AttributeError => exceptions::PyAttributeError::new_err(msg),
         ExcType::FrozenInstanceError => {
-            if let Ok(exc_cls) = get_frozen_instance_error(py) {
-                if let Ok(exc_instance) = exc_cls.call1((PyString::new(py, &msg),)) {
-                    return PyErr::from_value(exc_instance);
-                }
+            if let Ok(exc_cls) = get_frozen_instance_error(py)
+                && let Ok(exc_instance) = exc_cls.call1((PyString::new(py, &msg),))
+            {
+                return PyErr::from_value(exc_instance);
             }
             // if creating the right exception fails, fallback to AttributeError which it's a subclass of
             exceptions::PyAttributeError::new_err(msg)
