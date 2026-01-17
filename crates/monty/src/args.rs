@@ -27,45 +27,82 @@ pub(crate) enum ArgValues {
 
 impl ArgValues {
     /// Checks that zero arguments were passed.
-    pub fn check_zero_args(&self, name: &str) -> RunResult<()> {
+    ///
+    /// On error, properly drops all contained values to maintain reference counts.
+    pub fn check_zero_args(self, name: &str, heap: &mut Heap<impl ResourceTracker>) -> RunResult<()> {
         match self {
             Self::Empty => Ok(()),
-            _ => Err(ExcType::type_error_no_args(name, self.count())),
+            other => {
+                let count = other.count();
+                other.drop_with_heap(heap);
+                Err(ExcType::type_error_no_args(name, count))
+            }
         }
     }
 
     /// Checks that exactly one positional argument was passed, returning it.
-    pub fn get_one_arg(self, name: &str) -> RunResult<Value> {
+    ///
+    /// On error, properly drops all contained values to maintain reference counts.
+    pub fn get_one_arg(self, name: &str, heap: &mut Heap<impl ResourceTracker>) -> RunResult<Value> {
         match self {
             Self::One(a) => Ok(a),
-            _ => Err(ExcType::type_error_arg_count(name, 1, self.count())),
+            other => {
+                let count = other.count();
+                other.drop_with_heap(heap);
+                Err(ExcType::type_error_arg_count(name, 1, count))
+            }
         }
     }
 
     /// Checks that exactly two positional arguments were passed, returning them as a tuple.
-    pub fn get_two_args(self, name: &str) -> RunResult<(Value, Value)> {
+    ///
+    /// On error, properly drops all contained values to maintain reference counts.
+    pub fn get_two_args(self, name: &str, heap: &mut Heap<impl ResourceTracker>) -> RunResult<(Value, Value)> {
         match self {
             Self::Two(a1, a2) => Ok((a1, a2)),
-            _ => Err(ExcType::type_error_arg_count(name, 2, self.count())),
+            other => {
+                let count = other.count();
+                other.drop_with_heap(heap);
+                Err(ExcType::type_error_arg_count(name, 2, count))
+            }
         }
     }
 
     /// Checks that one or two arguments were passed, returning them as a tuple.
-    pub fn get_one_two_args(self, name: &str) -> RunResult<(Value, Option<Value>)> {
+    ///
+    /// On error, properly drops all contained values to maintain reference counts.
+    pub fn get_one_two_args(
+        self,
+        name: &str,
+        heap: &mut Heap<impl ResourceTracker>,
+    ) -> RunResult<(Value, Option<Value>)> {
         match self {
             Self::One(a) => Ok((a, None)),
             Self::Two(a1, a2) => Ok((a1, Some(a2))),
-            Self::Empty => Err(ExcType::type_error_at_least(name, 1, self.count())),
-            _ => Err(ExcType::type_error_at_most(name, 2, self.count())),
+            other => {
+                let count = other.count();
+                other.drop_with_heap(heap);
+                if count == 0 {
+                    Err(ExcType::type_error_at_least(name, 1, count))
+                } else {
+                    Err(ExcType::type_error_at_most(name, 2, count))
+                }
+            }
         }
     }
 
     /// Checks that zero or one argument was passed, returning the optional value.
-    pub fn get_zero_one_arg(self, name: &str) -> RunResult<Option<Value>> {
+    ///
+    /// On error, properly drops all contained values to maintain reference counts.
+    pub fn get_zero_one_arg(self, name: &str, heap: &mut Heap<impl ResourceTracker>) -> RunResult<Option<Value>> {
         match self {
             Self::Empty => Ok(None),
             Self::One(a) => Ok(Some(a)),
-            _ => Err(ExcType::type_error_at_most(name, 1, self.count())),
+            other => {
+                let count = other.count();
+                other.drop_with_heap(heap);
+                Err(ExcType::type_error_at_most(name, 1, count))
+            }
         }
     }
 

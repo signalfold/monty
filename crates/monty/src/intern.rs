@@ -9,6 +9,8 @@
 //!
 //! The first string entry (index 0) is always `"<module>"` for module-level code.
 
+use std::{borrow::Cow, sync::LazyLock};
+
 use ahash::AHashMap;
 
 use crate::function::Function;
@@ -23,14 +25,51 @@ pub struct StringId(u32);
 /// The StringId for `"<module>"` - always index 0 in the interner.
 pub const MODULE_STRING_ID: StringId = StringId(0);
 
+/// update MAX_ATTR_ID when adding new attrs
+const MAX_ATTR_ID: u32 = 21;
+
+/// Number of ASCII single-character strings pre-interned at startup.
+const ASCII_STRING_COUNT: u32 = 128;
+
+/// First StringId reserved for ASCII single-character interns.
+const ASCII_STRING_START_ID: u32 = MAX_ATTR_ID + 1;
+
+/// Static strings for all 128 ASCII characters, built once on first access.
+///
+/// Uses `LazyLock` to build the array at runtime (once), leaking the strings to get
+/// `'static` lifetime. The leak is intentional and bounded (128 single-byte strings).
+static ASCII_STRS: LazyLock<[&'static str; 128]> = LazyLock::new(|| {
+    std::array::from_fn(|i| {
+        // Safe: i is always 0-127 for a 128-element array
+        let s = char::from(u8::try_from(i).expect("index out of u8 range")).to_string();
+        // Leak to get 'static lifetime - this is intentional and bounded (128 bytes total)
+        // Reborrow as immutable since we won't mutate
+        &*Box::leak(s.into_boxed_str())
+    })
+});
+
+/// Returns the interned StringId for an ASCII byte.
+///
+/// These interns are created during `InternerBuilder::new()` and allow
+/// allocation-free iteration over ASCII strings.
+#[must_use]
+pub(crate) fn ascii_string_id(byte: u8) -> StringId {
+    StringId(ASCII_STRING_START_ID + u32::from(byte))
+}
+
 /// Pre-interned attribute names for container methods.
 ///
 /// These StringIds are assigned at startup in `InternerBuilder::new()` and provide
 /// O(1) comparison for common method names without heap allocation.
 ///
 /// Usage: `use crate::intern::attr;` then `attr::APPEND`, `attr::GET`, etc.
+///
+/// IMPORTANT NOTE: the last (max) attribute ID must be kept as `MAX_ATTR_ID` by updating
+/// `MAX_ATTR_ID` when new attrs are added.
+///
+/// ALSO update `InternerBuilder::new` debug_assertions when adding new attrs!
 pub mod attr {
-    use super::StringId;
+    use super::{MAX_ATTR_ID, StringId};
 
     // List methods
     pub const APPEND: StringId = StringId(1);
@@ -59,6 +98,9 @@ pub mod attr {
     pub const ISSUBSET: StringId = StringId(18);
     pub const ISSUPERSET: StringId = StringId(19);
     pub const ISDISJOINT: StringId = StringId(20);
+
+    // String methods
+    pub const JOIN: StringId = StringId(MAX_ATTR_ID);
 }
 
 impl StringId {
@@ -142,9 +184,9 @@ impl ExtFunctionId {
 #[derive(Debug, Default)]
 pub struct InternerBuilder {
     /// Maps strings to their indices for deduplication during interning.
-    string_map: AHashMap<String, StringId>,
+    string_map: AHashMap<Cow<'static, str>, StringId>,
     /// Storage for interned interns, indexed by `StringId`.
-    strings: Vec<String>,
+    strings: Vec<Cow<'static, str>>,
     /// Storage for interned bytes literals, indexed by `BytesId`.
     /// Not deduplicated since bytes literals are rare.
     bytes: Vec<Vec<u8>>,
@@ -158,12 +200,15 @@ impl InternerBuilder {
     ///
     /// Pre-interns:
     /// - Index 0: `"<module>"` for module-level code
-    /// - Indices 1-20: Known attribute names (append, insert, get, etc.)
+    /// - Indices 1-MAX_ATTR_ID: Known attribute names (append, insert, get, join, etc.)
+    /// - Indices MAX_ATTR_ID+1..: ASCII single-character strings
     pub fn new(code: &str) -> Self {
         // very rough guess of the number of strings that will need to be interned
         // Dividing by 2 since each string has open+close quotes.
         // This overcounts (escaped quotes, triple quotes) but for capacity that's fine
-        let string_count_guess = 21 + (code.bytes().filter(|&b| b == b'"' || b == b'\'').count() >> 1);
+        let string_count_guess = (MAX_ATTR_ID + ASCII_STRING_COUNT) as usize
+            + 1
+            + (code.bytes().filter(|&b| b == b'"' || b == b'\'').count() >> 1);
         let mut interner = Self {
             string_map: AHashMap::with_capacity(string_count_guess),
             strings: Vec::with_capacity(string_count_guess),
@@ -171,53 +216,61 @@ impl InternerBuilder {
         };
 
         // Index 0: "<module>" for module-level code
-        let id = interner.intern("<module>");
+        let id = interner.intern_static("<module>");
         debug_assert_eq!(id, MODULE_STRING_ID);
 
         // Pre-intern known attribute names (indices 1-20).
         // Order must match the attr::* constants defined above.
         // Note: We separate the intern() call from debug_assert_eq! because
         // debug_assert_eq! is completely removed in release builds.
-        let id = interner.intern("append");
+        let id = interner.intern_static("append");
         debug_assert_eq!(id, attr::APPEND);
-        let id = interner.intern("insert");
+        let id = interner.intern_static("insert");
         debug_assert_eq!(id, attr::INSERT);
-        let id = interner.intern("get");
+        let id = interner.intern_static("get");
         debug_assert_eq!(id, attr::GET);
-        let id = interner.intern("keys");
+        let id = interner.intern_static("keys");
         debug_assert_eq!(id, attr::KEYS);
-        let id = interner.intern("values");
+        let id = interner.intern_static("values");
         debug_assert_eq!(id, attr::VALUES);
-        let id = interner.intern("items");
+        let id = interner.intern_static("items");
         debug_assert_eq!(id, attr::ITEMS);
-        let id = interner.intern("pop");
+        let id = interner.intern_static("pop");
         debug_assert_eq!(id, attr::POP);
-        let id = interner.intern("clear");
+        let id = interner.intern_static("clear");
         debug_assert_eq!(id, attr::CLEAR);
-        let id = interner.intern("copy");
+        let id = interner.intern_static("copy");
         debug_assert_eq!(id, attr::COPY);
-        let id = interner.intern("add");
+        let id = interner.intern_static("add");
         debug_assert_eq!(id, attr::ADD);
-        let id = interner.intern("remove");
+        let id = interner.intern_static("remove");
         debug_assert_eq!(id, attr::REMOVE);
-        let id = interner.intern("discard");
+        let id = interner.intern_static("discard");
         debug_assert_eq!(id, attr::DISCARD);
-        let id = interner.intern("update");
+        let id = interner.intern_static("update");
         debug_assert_eq!(id, attr::UPDATE);
-        let id = interner.intern("union");
+        let id = interner.intern_static("union");
         debug_assert_eq!(id, attr::UNION);
-        let id = interner.intern("intersection");
+        let id = interner.intern_static("intersection");
         debug_assert_eq!(id, attr::INTERSECTION);
-        let id = interner.intern("difference");
+        let id = interner.intern_static("difference");
         debug_assert_eq!(id, attr::DIFFERENCE);
-        let id = interner.intern("symmetric_difference");
+        let id = interner.intern_static("symmetric_difference");
         debug_assert_eq!(id, attr::SYMMETRIC_DIFFERENCE);
-        let id = interner.intern("issubset");
+        let id = interner.intern_static("issubset");
         debug_assert_eq!(id, attr::ISSUBSET);
-        let id = interner.intern("issuperset");
+        let id = interner.intern_static("issuperset");
         debug_assert_eq!(id, attr::ISSUPERSET);
-        let id = interner.intern("isdisjoint");
+        let id = interner.intern_static("isdisjoint");
         debug_assert_eq!(id, attr::ISDISJOINT);
+        let id = interner.intern_static("join");
+        debug_assert_eq!(id, attr::JOIN);
+
+        // Pre-intern ASCII single-character strings so string iteration can reuse interns.
+        for byte in 0u8..=127 {
+            let id = interner.intern_static(ASCII_STRS[byte as usize]);
+            debug_assert_eq!(id, ascii_string_id(byte));
+        }
 
         interner
     }
@@ -227,9 +280,17 @@ impl InternerBuilder {
     /// If the string was already interned, returns the existing `StringId`.
     /// Otherwise, stores the string and returns a new `StringId`.
     pub fn intern(&mut self, s: &str) -> StringId {
-        *self.string_map.entry(s.to_owned()).or_insert_with(|| {
+        *self.string_map.entry(s.to_owned().into()).or_insert_with(|| {
             let id = StringId(self.strings.len().try_into().expect("StringId overflow"));
-            self.strings.push(s.to_owned());
+            self.strings.push(s.to_owned().into());
+            id
+        })
+    }
+
+    fn intern_static(&mut self, s: &'static str) -> StringId {
+        *self.string_map.entry(s.into()).or_insert_with(|| {
+            let id = StringId(self.strings.len().try_into().expect("StringId overflow"));
+            self.strings.push(s.into());
             id
         })
     }
@@ -259,7 +320,7 @@ impl InternerBuilder {
 /// This provides lookup by `StringId`, `BytesId` and `FunctionId` for interned literals and functions
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Interns {
-    strings: Vec<String>,
+    strings: Vec<Cow<'static, str>>,
     bytes: Vec<Vec<u8>>,
     functions: Vec<Function>,
     external_functions: Vec<String>,

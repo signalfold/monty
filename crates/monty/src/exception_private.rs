@@ -814,6 +814,26 @@ impl ExcType {
     pub(crate) fn divmod_by_zero() -> RunError {
         SimpleException::new_msg(Self::ZeroDivisionError, "division by zero").into()
     }
+
+    /// Creates a TypeError for str.join() when an item is not a string.
+    ///
+    /// Matches CPython's format: `TypeError: sequence item {index}: expected str instance, {type} found`
+    #[must_use]
+    pub(crate) fn type_error_join_item(index: usize, item_type: Type) -> RunError {
+        SimpleException::new_msg(
+            Self::TypeError,
+            format!("sequence item {index}: expected str instance, {item_type} found"),
+        )
+        .into()
+    }
+
+    /// Creates a TypeError for str.join() when the argument is not iterable.
+    ///
+    /// Matches CPython's format: `TypeError: can only join an iterable`
+    #[must_use]
+    pub(crate) fn type_error_join_not_iterable() -> RunError {
+        SimpleException::new_msg(Self::TypeError, "can only join an iterable").into()
+    }
 }
 
 /// Simple lightweight representation of an exception.
