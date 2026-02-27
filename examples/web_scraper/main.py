@@ -15,6 +15,7 @@ from pydantic_monty import Monty, MontyError, MontyRuntimeError, run_monty_async
 
 from .browser import start_browser
 from .external_functions import beautiful_soup
+from .sub_agent import RecordModels
 
 logfire.configure()
 logfire.instrument_pydantic_ai()
@@ -35,21 +36,25 @@ def _generate_stubs() -> str:
         return (Path(tmpdir) / 'external_functions.pyi').read_text()
 
 
-stubs = _generate_stubs()
+stubs = f"""
+{RecordModels.record_model_info_stub()}
 
-scrape_agent = Agent(
-    'gateway/anthropic:claude-sonnet-4-5',
-    instructions=f"""
+{_generate_stubs()}
+"""
+instrunctions = f"""
 You MUST return markdown with either a comment and python code to execute
-in a "```python" code block, or an explanation of your process and model pricing information to end.
+in a "```python" code block, or an explanation of your process to end.
 
 You MUST return only one code block to execute. DO NOT return multiple code blocks.
 
+You MUST use the `record_model_info` function to record information about every model you find.
+
 The runtime uses a restricted Python subset:
 - you cannot use the standard library except builtin functions and the following modules: `sys`, `typing`, `asyncio`
-- this means `json`, `collections`, `json`, `re`, `math`, `datetime`, `itertools`, `functools`, etc. are NOT available — use plain dicts, lists, and builtins instead
+- this means `json`, `collections`, `json`, `re`, `math`, `datetime`, `itertools`, `functools`, etc. are NOT available  use plain dicts, lists, and builtins instead
 - you cannot use third party libraries
 - you cannot define classes
+- the python executor is NOT a REPL, you must define all values each time you call python
 
 The last expression evaluated is the return value.
 
@@ -62,8 +67,9 @@ You can use the following types functions and types:
 ```python
 {stubs}
 ```
-""",
-)
+"""
+
+scrape_agent = Agent('gateway/anthropic:claude-sonnet-4-5', instructions=instrunctions)
 
 urls = {
     'openai': 'https://developers.openai.com/api/docs/pricing',
@@ -75,7 +81,7 @@ urls = {
 async def main(model: str):
     url = urls[model]
     prompt = f"""
-Get information including pricing data for all models from the following URL:
+Get structured information including pricing data for all models from the following URL:
 
 {url}
 
@@ -89,6 +95,8 @@ Ignore any deprecated models.
 
     def monty_print(_: Literal['stdout'], content: str):
         print_output.append(content)
+
+    record_models = RecordModels()
 
     async with start_browser() as browser:
         async with scrape_agent.iter(prompt) as agent_run:
@@ -110,7 +118,7 @@ Ignore any deprecated models.
                     with logfire.span('prepare monty', code=extracted.code):
                         m = Monty(
                             extracted.code,
-                            external_functions=['open_page', 'beautiful_soup'],
+                            external_functions=['open_page', 'beautiful_soup', 'record_model_info'],
                             type_check=True,
                             type_check_stubs=stubs,
                         )
@@ -126,6 +134,7 @@ Ignore any deprecated models.
                             external_functions={
                                 'open_page': browser.open_page,
                                 'beautiful_soup': beautiful_soup,
+                                'record_model_info': record_models.record_model_info,
                             },
                             print_callback=monty_print,
                         )
@@ -139,9 +148,11 @@ Ignore any deprecated models.
                     print_output.clear()
                 node = await agent_run.next(new_node(msg))
 
+        logfire.info('{models=}', models=record_models.models)
+
 
 def new_node(msg: str) -> ModelRequestNode[None, str]:
-    return ModelRequestNode(request=ModelRequest(parts=[UserPromptPart(content=msg)]))
+    return ModelRequestNode(request=ModelRequest(instructions=instrunctions, parts=[UserPromptPart(content=msg)]))
 
 
 @dataclass
