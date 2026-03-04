@@ -59,6 +59,10 @@ pub enum Type {
     Path,
     /// A property descriptor - displays as "property"
     Property,
+    /// A compiled regex pattern from `re.compile()` - displays as "re.Pattern"
+    RePattern,
+    /// A regex match result from `re.match()` / `re.search()` etc. - displays as "re.Match"
+    ReMatch,
 }
 
 impl fmt::Display for Type {
@@ -92,6 +96,8 @@ impl fmt::Display for Type {
             Self::SpecialForm => f.write_str("typing._SpecialForm"),
             Self::Path => f.write_str("PosixPath"),
             Self::Property => f.write_str("property"),
+            Self::RePattern => f.write_str("re.Pattern"),
+            Self::ReMatch => f.write_str("re.Match"),
         }
     }
 }

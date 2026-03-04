@@ -493,6 +493,9 @@ impl MontyObject {
                         Self::Repr(format!("<gather({})>", gather.item_count()))
                     }
                     HeapData::Path(path) => Self::Path(path.as_str().to_owned()),
+                    HeapData::RePattern(_) | HeapData::ReMatch(_) => {
+                        Self::Repr(object.py_repr(heap, interns).into_owned())
+                    }
                     HeapData::ExtFunction(name) => Self::Function {
                         name: name.clone(),
                         docstring: None,

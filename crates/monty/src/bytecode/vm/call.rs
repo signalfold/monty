@@ -370,7 +370,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
                 Ok(CallResult::Push(result))
             }
             Value::ModuleFunction(mf) => {
-                let result = mf.call(self.heap, args)?;
+                let result = mf.call(self.heap, args, self.interns)?;
                 Ok(result.into())
             }
             Value::ExtFunction(name_id) => {

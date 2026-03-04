@@ -349,6 +349,87 @@ pub enum StaticStrings {
     Start,
     Stop,
     Step,
+
+    // ==========================
+    // module strings
+    // ==========================
+
+    // re module strings
+    /// Module name for `import re`.
+    Re,
+    /// `re.compile()` function
+    Compile,
+    /// `re.match()` / `pattern.match()` method
+    Match,
+    /// `re.search()` / `pattern.search()` method
+    Search,
+    /// `re.fullmatch()` / `pattern.fullmatch()` method
+    Fullmatch,
+    /// `re.findall()` / `pattern.findall()` method
+    Findall,
+    /// `re.sub()` / `pattern.sub()` method
+    Sub,
+    /// `match.group()` method
+    Group,
+    /// `match.groups()` method
+    Groups,
+    /// `match.span()` method
+    Span,
+    /// `match.end()` method
+    End,
+    /// `re.Pattern`
+    #[strum(serialize = "Pattern")]
+    PatternClass,
+    /// `re.Match`
+    #[strum(serialize = "Match")]
+    MatchClass,
+    /// `pattern.pattern`
+    #[strum(serialize = "pattern")]
+    PatternAttr,
+    /// `match.string`
+    #[strum(serialize = "string")]
+    StringAttr,
+    /// `pattern.flags`
+    Flags,
+    /// `re.IGNORECASE` flag
+    #[strum(serialize = "IGNORECASE")]
+    Ignorecase,
+    /// `re.I` flag, alias
+    #[strum(serialize = "I")]
+    I,
+    /// `re.MULTILINE` flag
+    #[strum(serialize = "MULTILINE")]
+    MultilineFlag,
+    /// `re.M` flag, alias
+    #[strum(serialize = "M")]
+    M,
+    /// `re.DOTALL` flag
+    #[strum(serialize = "DOTALL")]
+    DotallFlag,
+    /// `re.S` flag, alias
+    #[strum(serialize = "S")]
+    S,
+    /// `re.NOFLAG` flag
+    #[strum(serialize = "NOFLAG")]
+    NoFlag,
+    /// `re.ASCII` flag
+    #[strum(serialize = "ASCII")]
+    AsciiFlag,
+    /// `re.A` flag, alias
+    #[strum(serialize = "A")]
+    A,
+    /// `re.PatternError` exception
+    #[strum(serialize = "PatternError")]
+    PatternError,
+    /// `re.error` exception alias (same as `re.PatternError`)
+    #[strum(serialize = "error")]
+    Error,
+    /// `re.escape()` function
+    Escape,
+    /// `re.finditer()` / `pattern.finditer()` method
+    Finditer,
+    /// `match.groupdict()` method
+    Groupdict,
 }
 
 impl StaticStrings {

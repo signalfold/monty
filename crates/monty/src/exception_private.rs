@@ -105,6 +105,21 @@ pub enum ExcType {
     SyntaxError,
     TimeoutError,
     TypeError,
+
+    // --- Module-specific exception types ---
+
+    // --- re module ---
+    /// `re.PatternError` - raised for invalid regex patterns or unsupported regex features.
+    ///
+    /// # Behavior Note
+    ///
+    /// Limited to monty's exception type, `PatternError` does not provide `pattern`, `pos`,
+    /// `lineno` and `colno` attributes.
+    ///
+    /// As per CPython's implementation, it would be hard to convert `fancy-regex`'s error
+    /// representations into the required attributes.
+    #[strum(serialize = "re.PatternError")]
+    RePatternError,
 }
 
 impl ExcType {
@@ -747,6 +762,14 @@ impl ExcType {
         SimpleException::new_msg(Self::IndexError, "range object index out of range").into()
     }
 
+    /// Creates an IndexError for `re.Match` group index out of range.
+    ///
+    /// Matches CPython's format: `IndexError('no such group')`
+    #[must_use]
+    pub(crate) fn re_match_group_index_error() -> RunError {
+        SimpleException::new_msg(Self::IndexError, "no such group").into()
+    }
+
     /// Creates a TypeError for non-integer sequence indices (getitem).
     ///
     /// Matches CPython's format: `TypeError('{type}' indices must be integers, not '{index_type}')`
@@ -790,7 +813,7 @@ impl ExcType {
     pub(crate) fn name_error(name: &str) -> SimpleException {
         let mut msg = format!("name '{name}' is not defined");
         // add the same suffix as cpython, but only for the modules supported by Monty
-        if matches!(name, "asyncio" | "sys" | "typing" | "types") {
+        if matches!(name, "asyncio" | "sys" | "typing" | "types" | "re") {
             write!(&mut msg, ". Did you forget to import '{name}'?").unwrap();
         }
         SimpleException::new_msg(Self::NameError, msg)
@@ -1091,6 +1114,14 @@ impl ExcType {
     #[must_use]
     pub(crate) fn lookup_error_unknown_error_handler(name: &str) -> RunError {
         SimpleException::new_msg(Self::LookupError, format!("unknown error handler name '{name}'")).into()
+    }
+
+    /// Creates a `re.PatternError` for an invalid regex pattern or unsupported regex feature.
+    ///
+    /// Matches CPython's exception type: `re.PatternError: {message}`
+    #[must_use]
+    pub(crate) fn re_pattern_error(msg: impl fmt::Display) -> RunError {
+        SimpleException::new_msg(Self::RePatternError, msg).into()
     }
 }
 
