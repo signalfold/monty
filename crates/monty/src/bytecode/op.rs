@@ -419,6 +419,25 @@ pub enum Opcode {
     ///
     /// Appended at the end to preserve the serialized byte values of all older opcodes.
     DeleteGlobal,
+
+    /// Pop a mapping, silently merge into the dict at `depth`. Operand: u8 depth.
+    ///
+    /// Used for `**expr` unpack inside dict literals, where later keys overwrite earlier ones
+    /// (unlike `DictMerge` which raises `TypeError` on duplicate keys).
+    ///
+    /// Stack: [..., dict, iter1, ..., iterN, mapping] -> [..., dict, iter1, ..., iterN]
+    /// Pops mapping (TOS), merges into dict at stack position `len - 2 - depth`.
+    /// Raises `TypeError` if `mapping` is not a dict.
+    DictUpdate,
+    /// Pop an iterable, add all items to set at `depth`. Operand: u8 depth.
+    ///
+    /// Used for `*expr` unpack inside set literals (e.g., `{*a, 1}`).
+    /// Follows the same depth convention as `ListAppend`/`SetAdd`.
+    ///
+    /// Stack: [..., set, iter1, ..., iterN, iterable] -> [..., set, iter1, ..., iterN]
+    /// Pops iterable (TOS), adds each item to set at stack position `len - 2 - depth`.
+    /// Raises `TypeError` if iterable is not iterable.
+    SetExtend,
 }
 
 impl TryFrom<u8> for Opcode {
@@ -438,22 +457,9 @@ impl Opcode {
     /// For opcodes that have known, fixed stack effects, returns `Some(i16)`.
     #[must_use]
     pub const fn stack_effect(self) -> Option<i16> {
-        use Opcode::{
-            Await, BinaryAdd, BinaryAnd, BinaryDiv, BinaryFloorDiv, BinaryLShift, BinaryMatMul, BinaryMod, BinaryMul,
-            BinaryOr, BinaryPow, BinaryRShift, BinarySub, BinarySubscr, BinaryXor, BuildDict, BuildFString, BuildList,
-            BuildSet, BuildSlice, BuildTuple, CallAttr, CallAttrExtended, CallAttrKw, CallBuiltinFunction,
-            CallBuiltinType, CallFunction, CallFunctionExtended, CallFunctionKw, CheckExcMatch, ClearException,
-            CompareEq, CompareGe, CompareGt, CompareIn, CompareIs, CompareIsNot, CompareLe, CompareLt, CompareModEq,
-            CompareNe, CompareNotIn, DeleteGlobal, DeleteLocal, DictMerge, DictSetItem, Dup, Dup2, ForIter,
-            FormatValue, GetIter, InplaceAdd, InplaceAnd, InplaceDiv, InplaceFloorDiv, InplaceLShift, InplaceMod,
-            InplaceMul, InplaceOr, InplacePow, InplaceRShift, InplaceSub, InplaceXor, Jump, JumpIfFalse,
-            JumpIfFalseOrPop, JumpIfTrue, JumpIfTrueOrPop, ListAppend, ListExtend, ListToTuple, LoadAttr,
-            LoadAttrImport, LoadCell, LoadConst, LoadFalse, LoadGlobal, LoadGlobalCallable, LoadLocal, LoadLocal0,
-            LoadLocal1, LoadLocal2, LoadLocal3, LoadLocalCallable, LoadLocalCallableW, LoadLocalW, LoadModule,
-            LoadNone, LoadSmallInt, LoadTrue, MakeClosure, MakeFunction, Nop, Pop, Raise, RaiseImportError, Reraise,
-            ReturnValue, Rot2, Rot3, SetAdd, StoreAttr, StoreCell, StoreGlobal, StoreLocal, StoreLocalW, StoreSubscr,
-            UnaryInvert, UnaryNeg, UnaryNot, UnaryPos, UnpackEx, UnpackSequence,
-        };
+        #![expect(clippy::allow_attributes, reason = "expect seems broken with enum_glob_use")]
+        #[allow(clippy::enum_glob_use, reason = "simplifies churn")]
+        use Opcode::*;
         Some(match self {
             // Stack operations
             Pop => -1,
@@ -540,6 +546,12 @@ impl Opcode {
             // Unpacking - depends on operand
             UnpackSequence | UnpackEx => return None,
 
+            // Dict/set literal extensions (PEP 448):
+            // DictUpdate: pop mapping, silently merge into dict below = -1
+            DictUpdate => -1,
+            // SetExtend: pop iterable, add all items to set below = -1
+            SetExtend => -1,
+
             // Special
             Nop => 0,
 
@@ -583,12 +595,14 @@ mod tests {
         assert_eq!(Opcode::RaiseImportError as u8, 110);
         assert_eq!(Opcode::Dup2 as u8, 111);
         assert_eq!(Opcode::DeleteGlobal as u8, 112);
+        assert_eq!(Opcode::DictUpdate as u8, 113);
+        assert_eq!(Opcode::SetExtend as u8, 114);
     }
 
     #[test]
     fn test_invalid_opcode() {
         // Byte just after the last valid opcode should fail
-        let result = Opcode::try_from(Opcode::DeleteGlobal as u8 + 1);
+        let result = Opcode::try_from(Opcode::SetExtend as u8 + 1);
         assert!(result.is_err());
         // 255 should also fail
         let result = Opcode::try_from(255u8);

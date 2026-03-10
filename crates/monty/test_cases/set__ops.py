@@ -152,3 +152,40 @@ assert len(s) == 3, 'set literal deduplication'
 x = 5
 s = {x, x + 1, x + 2}
 assert len(s) == 3, 'set literal with expressions'
+
+# === Set unpacking (PEP 448) ===
+a = [1, 2]
+b = [3, 4]
+assert {*a} == {1, 2}, 'single set unpack from list'
+assert {*a, *b} == {1, 2, 3, 4}, 'double set unpack'
+assert {0, *a, 5} == {0, 1, 2, 5}, 'mixed set unpack'
+assert {*[]} == set(), 'unpack empty into set'
+assert {*(1, 2)} == {1, 2}, 'unpack tuple into set'
+assert {*{'a': 1, 'b': 2}} == {'a', 'b'}, 'unpack dict keys into set'
+assert {*'aab'} == {'a', 'b'}, 'unpack string into set'
+# Heap-allocated set: covers the HeapData::Set arm in set_extend
+inner_set = {1, 2, 3}
+assert {*inner_set} == {1, 2, 3}, 'unpack set into set'
+# Heap-allocated Str (result of concat, not interned): covers HeapData::Str in set_extend
+hs = 'hel' + 'lo'
+assert {*hs} == {'h', 'e', 'l', 'o'}, 'unpack heap string into set'
+
+
+# Non-iterable heap-allocated Ref (closure) hits the inner `_` arm in set_extend.
+# A plain top-level function is Value::DefFunction (not a Ref), so a closure is
+# required to reach the Value::Ref(_) branch (HeapData that is not List/Tuple/Set/Dict/Str).
+def _make_set_unpack_closure():
+    _sentinel = 1
+
+    def _inner():
+        return _sentinel
+
+    return _inner
+
+
+_set_unpack_closure = _make_set_unpack_closure()
+try:
+    _x = {*_set_unpack_closure}
+    assert False, 'expected TypeError for non-iterable heap closure in set unpack'
+except TypeError:
+    pass

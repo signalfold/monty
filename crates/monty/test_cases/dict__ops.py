@@ -111,3 +111,23 @@ assert d['self'] is d, 'getitem self'
 
 d = {}
 assert d.get('missing', d) is d, 'get default same dict'
+
+# === Dict unpacking (PEP 448) ===
+a = {'x': 1, 'y': 2}
+b = {'y': 99, 'z': 3}
+assert {**a} == {'x': 1, 'y': 2}, 'single unpack'
+assert {**a, **b} == {'x': 1, 'y': 99, 'z': 3}, 'double unpack, later wins'
+assert {**a, 'y': 0} == {'x': 1, 'y': 0}, 'literal overrides unpacked key'
+assert {'y': 0, **a} == {'y': 2, 'x': 1}, 'unpack overrides earlier literal'
+assert {**a, 'z': 3} == {'x': 1, 'y': 2, 'z': 3}, 'unpack then new key'
+assert {**{}} == {}, 'unpack empty dict'
+assert {**a, **b, 'w': 4} == {'x': 1, 'y': 99, 'z': 3, 'w': 4}, 'complex mixed'
+assert list({**a, 'z': 3}.keys()) == ['x', 'y', 'z'], 'insertion order preserved'
+
+# === Dict unpack TypeError for non-mapping heap ref ===
+# Unpacking a Ref that is NOT a dict (e.g. a list) should raise TypeError
+try:
+    x = {**[1, 2, 3]}
+    assert False, 'expected TypeError'
+except TypeError as e:
+    assert str(e) == "'list' object is not a mapping", f'wrong error: {e}'
